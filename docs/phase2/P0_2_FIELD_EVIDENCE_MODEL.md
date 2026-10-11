@@ -119,6 +119,51 @@ class BillField:
 > 这些约束把"缺失不等于 0""冲突必须暴露"固化在类型层面，
 > 与 P0-1 中 `PdfExtractionResult` 的做法一致。
 
+### 4.2.1 首批字段标识符清单（与 `P0_2_REGRESSION_BASELINE.md` 逐字一致）
+
+字段名是**跨文档与代码的唯一契约**，必须逐字一致。
+下表为标准字段名与单位的权威清单，三份文档（基线 / 本设计 / 测试清单）
+均以此为准：
+
+| 标准字段名 | 中文含义 | 单位 |
+|---|---|---|
+| `billing_period_start` | 账期开始日 | （日期） |
+| `billing_period_end` | 账期结束日 | （日期） |
+| `total_consumption` | 正式总用电量 | kWh |
+| `bill_total_amount` | 账单总金额 | 元 |
+| `vat_invoice_amount` | 增值税发票金额 | 元 |
+| `displayed_average_price` | 账单展示平均电价 | 元/kWh |
+| `industrial_commercial_fee` | 工商业电费 | 元 |
+| `market_purchase_fee` | 市场化购电电费 | 元 |
+| `grid_loss_fee` | 上网环节线损费用 | 元 |
+| `transmission_distribution_fee` | 输配电费 | 元 |
+| `system_operation_fee` | 系统运行费 | 元 |
+| `government_fund_fee` | 政府性基金及附加 | 元 |
+| `power_factor_adjustment_fee` | 功率因数调整电费 | 元 |
+| `demand_charge` | 需量电费 | 元 |
+
+参与"五项之和"的字段（任一缺失则勾稽不成立）：
+
+```text
+market_purchase_fee
++ grid_loss_fee
++ transmission_distribution_fee
++ system_operation_fee
++ government_fund_fee
+= industrial_commercial_fee          （核对关系 1）
+```
+
+```text
+industrial_commercial_fee
++ power_factor_adjustment_fee
+= bill_total_amount                  （核对关系 2）
+```
+
+**不参与**上述求和：`demand_charge`（需量电费）、`vat_invoice_amount`（发票金额）。
+
+> 单位纪律：`元/kWh` 是单价，`元` 是金额，`kWh` 是电量，
+> 三者不得存入同一字段（任务书 5.2）。
+
 ### 4.3 `BillFieldSet` —— 一次解析的完整结果
 
 ```python
