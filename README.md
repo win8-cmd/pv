@@ -384,12 +384,10 @@ pv/  (仓库根目录)
 8. **未提供打包与安装程序。** 仅支持源码方式安装（`pip install -e`）。
 9. **Windows 上直接调用 `python` 可能命中 Microsoft Store 存根程序。**
    请使用 `.\.venv\Scripts\python.exe` 或 `py` 启动器。
-10. **CI 工作流尚未在 GitHub 上实际运行验证。** `.github/workflows/tests.yml`
-    已创建并通过 YAML 语法解析，且在本机复现了其等价命令；
-    但工作流在 GitHub Actions 上的真实运行结果需以该平台日志为准。
-    Python 3.11 的兼容性同样未在本机实测（本机为 3.14.7）。
 
----
+> **CI 状态：** `.github/workflows/tests.yml` 已在 GitHub Actions 上实际运行通过，
+> Python 3.14 与 3.11 两个作业均为 `234 passed`，无跳过用例。详见
+> [docs/ACCEPTANCE_CRITERIA.md](docs/ACCEPTANCE_CRITERIA.md) 第 5.2 节。
 
 ## 11. 文档索引
 
