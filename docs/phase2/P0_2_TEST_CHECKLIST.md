@@ -69,6 +69,27 @@
 
 ---
 
+## 2.3 字段标识符对照表（与基线逐字一致）
+
+测试断言必须使用下列**精确标识符**，不得使用近似名称：
+
+| 编号 | 标准字段名 | 单位 | 对应基线值（2025-09 / 2025-10） |
+|---|---|---|---|
+| F1 | `billing_period_start` | 日期 | `2025-09-01` / `2025-10-01` |
+| F2 | `billing_period_end` | 日期 | `2025-09-30` / `2025-10-31` |
+| F3 | `total_consumption` | kWh | `8780498` / `7479418` |
+| F4 | `bill_total_amount` | 元 | `6699241.94` / `5471334.24` |
+| F5 | `vat_invoice_amount` | 元 | `6534168.58` / `5330721.18` |
+| F6 | `displayed_average_price` | 元/kWh | `0.76297` / `0.73152` |
+| F7 | `industrial_commercial_fee` | 元 | `6708448.31` / `5509070.05` |
+| — | `market_purchase_fee` | 元 | `3840051.76` / `2912242.44` |
+| — | `grid_loss_fee` | 元 | `179343.47` / `145362.52` |
+| — | `transmission_distribution_fee` | 元 | `2000662.04` / `1787644.30` |
+| — | `system_operation_fee` | 元 | `291512.53` / `325751.10` |
+| — | `government_fund_fee` | 元 | `396878.51` / `338069.69` |
+| — | `power_factor_adjustment_fee` | 元 | `-9206.37` / `-37735.81` |
+| — | `demand_charge` | 元 | `1202916` / `1108107` |
+
 ## 3. 测试清单
 
 ### 3.1 账期（F1/F2）
@@ -150,16 +171,28 @@
 | `test_evidence_preserves_original_text` | 含空格/换行的原文 | `source_text` 与原文逐字符一致（未被规范化） |
 | `test_field_records_parser_version` | 任意字段 | `parser_version` 非空且等于模块常量 |
 
-### 3.7 与 P0-1 的状态联动（防止部分提取当完整账单）
+### 3.7 与 P0-1 的状态联动 + 确认闸门（防止部分提取当完整账单）
+
+**解析状态与"正式测算资格"必须分离**：解析成功、字段齐全只代表"可供复核"，
+**未经人工确认一律不得进入正式测算**。
 
 | 用例 | 输入 | 期望 |
 |---|---|---|
-| `test_partial_extraction_not_usable_for_calculation` | `extraction_status=PARTIAL`，字段全部解析成功 | `is_usable_for_calculation is False` |
-| `test_needs_ocr_extraction_not_usable` | `extraction_status=NEEDS_OCR` | `is_usable_for_calculation is False` |
-| `test_failed_extraction_not_usable` | `extraction_status=FAILED` | `is_usable_for_calculation is False` |
-| `test_success_extraction_with_conflict_not_usable` | `SUCCESS` 但存在冲突字段 | `is_usable_for_calculation is False` |
-| `test_success_extraction_all_parsed_is_usable` | `SUCCESS` 且字段齐备、勾稽通过 | `is_usable_for_calculation is True` |
-| `test_parse_success_is_not_bill_valid` | `SUCCESS` 且全部 `parsed` | 断言字段集状态**不等于**"账单已确认/valid"——解析成功 ≠ 账单有效 |
+| `test_partial_extraction_not_usable_for_calculation` | `extraction_status=PARTIAL` | 不可测算，且确认被拒 |
+| `test_needs_ocr_and_failed_not_usable` | `NEEDS_OCR` / `FAILED` | 不可测算，且确认被拒 |
+| `test_success_extraction_with_all_fields_is_usable_only_after_confirmation` | `SUCCESS` 且字段齐备、勾稽通过 | **未确认不可测算**；确认后 `is_usable_for_calculation is True` |
+| `test_parsed_and_complete_but_unconfirmed_cannot_enter_calculation` | 同上 | `is_parsed_and_ready_for_review is True` 但 `is_usable_for_calculation is False` |
+| `test_confirmed_result_can_enter_calculation` | 已确认 | `is_usable_for_calculation is True`，且记录确认人与时间 |
+| `test_confirmed_marker_alone_is_not_enough` | `confirm(confirmed_by="  ")` | 抛 `ValueError`（确认人不得为空白） |
+| `test_conflict_blocks_confirmation` | 存在冲突字段 | 确认被拒（`ValueError`） |
+| `test_missing_required_field_blocks_calculation_even_if_confirmed` | 缺必需字段 | 不可测算，确认被拒 |
+| `test_conflicted_never_usable_even_with_confirmation_flag` | 人为构造"已确认"但字段冲突 | 仍 `is_usable_for_calculation is False` |
+| `test_reconciliation_mismatch_blocks_confirmation` | 勾稽超差 | 不可测算，确认被拒 |
+| `test_rejected_result_cannot_enter_calculation` | 人工驳回 | 不可测算 |
+| `test_confirm_does_not_mutate_original_result` | 确认后 | 原结果仍为 `PENDING`（不可变语义） |
+| `test_confirmation_status_enum_covers_three_states` | — | 必须区分 `pending` / `confirmed` / `rejected` |
+| `test_review_status_is_exposed_without_confirmation` | 未确认 | `to_dict()` 暴露 `is_parsed_and_ready_for_review` / `is_confirmed` / `confirmation.status` |
+| `test_parse_success_is_not_bill_valid` | `SUCCESS` 且全部 `parsed` | 确认状态为 `pending`，不可测算——解析成功 ≠ 账单有效 |
 
 ### 3.8 非功能与架构
 
@@ -171,6 +204,29 @@
 | `test_fixture_contains_no_customer_identifiers` | 扫描内联 fixture，断言不含 `户名`、`户号`、`用电地址`、`受电点`、电能表编号等实际值 |
 
 ---
+
+### 3.9 证据范围（最小原文片段）
+
+任务书要求证据必须是"标签、对应数值和必要单位附近的最小原文片段"，
+且**不得把规范化文本冒充原文证据**。
+
+| 用例 | 期望 |
+|---|---|
+| `test_evidence_contains_label_and_value` | 已解析字段的证据含对应标签与数值（比较时按换行归一） |
+| `test_evidence_is_not_the_whole_page` | 证据 ≠ 整页文本，且严格短于整页 |
+| `test_evidence_excludes_unrelated_far_content` | 不含页面远端的无关内容 |
+| `test_evidence_excludes_other_fields_values` | 不含相邻字段的金额 |
+| `test_evidence_preserves_cross_line_unit` | 数值与单位跨行时，证据保留负号、数值与单位 |
+| `test_evidence_preserves_split_decimal_point` | 小数位被换行切开（`1787644.` ⏎ `3`）时仍可追溯 |
+| `test_evidence_comes_from_original_not_normalized` | 原文含行内空格时，证据保持原文形态 |
+| `test_evidence_snippet_is_local_for_every_parsed_field` | 所有已解析字段的证据长度 ≤ 整页一半 |
+| `test_evidence_page_number_correct_multi_page` | 多页文档证据页码正确指向来源页 |
+| `test_evidence_source_text_is_not_normalized_copy` | 证据是原始页文本的**连续子串**（逐字符校验） |
+| `test_redaction_checks_still_hold` | 证据不含客户标识（脱敏要求继续满足） |
+
+**实现要点（本仓库做法）**：匹配在"规范化副本"上进行；
+证据通过"匹配文本下标 → 原文下标"的**位置映射**回到原文截取。
+规范化与映射由**同一函数**产出，避免两套规则各自演化导致错位。
 
 ## 4. 验收标准
 
@@ -190,6 +246,10 @@
 | A10 | 展示平均电价独立保存且不被重算值覆盖 | 专项用例全绿 |
 | A11 | 每个字段可追溯到页码、原文与规则版本 | 证据用例全绿 |
 | A12 | P0-1 提取状态非 `SUCCESS` 时字段集不可用于测算 | 联动用例全绿 |
+| A13 | **解析成功但未经人工确认时不得进入正式测算** | 确认闸门用例全绿 |
+| A14 | 缺失/冲突/勾稽超差时确认被拒绝（确认不能绕过复核） | 确认拒绝用例全绿 |
+| A15 | 证据为最小原文片段，且是原始页文本的连续子串 | 证据范围用例全绿 |
+| A16 | 跨行数值、跨行单位、负号在证据中可追溯 | 跨行证据用例全绿 |
 
 ### 4.2 质量门禁
 
