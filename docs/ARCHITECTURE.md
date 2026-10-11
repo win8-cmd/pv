@@ -168,7 +168,8 @@ calculate_self_consumption_with_issues(load, pv, *, interval_minutes=None) \
 | `BUSINESS_TABLES` | 11 张业务表名，供测试核对 |
 | `SCHEMA_VERSION` | 模式版本号，写入 `schema_meta` |
 | `MIGRATIONS` | 模式迁移注册表 `{起始版本: (SQL, ...)}`，当前为空（`SCHEMA_VERSION = 1`） |
-| `Database` | 连接、事务、模式初始化、模式版本校验与迁移、表名与版本查询、`exists()`、`close()` |
+| `MISSING_VERSION` | 哨兵：`schema_meta` 表存在但缺 `schema_version` 记录（与 `None` 区分） |
+| `Database` | 连接、事务、模式初始化、元数据状态与版本校验、迁移、表名与版本查询、`exists()`、`close()` |
 | `ProjectRepository` | `project` 表的完整 CRUD |
 | `translate_integrity_error()` | 把驱动层 `IntegrityError` 分类为领域异常 |
 
@@ -185,20 +186,34 @@ calculate_self_consumption_with_issues(load, pv, *, interval_minutes=None) \
 故内存模式下本类持有一个常驻锚定连接，并为每个 `Database` 实例生成唯一库名，
 保证不同实例之间互不可见。
 
-#### 模式版本保护
+#### 模式版本与元数据保护
 
-`initialize_schema()` 先读取数据库中的模式版本，再决定动作：
+`initialize_schema()` 先读取数据库的**模式元数据状态**，再决定动作：
 
-| 数据库中的版本 | 行为 |
+| 数据库状态 | 行为 |
 |---|---|
-| 无 `schema_meta` 表（空库） | 建表并写入 `SCHEMA_VERSION` |
-| 等于 `SCHEMA_VERSION` | 幂等执行 `CREATE ... IF NOT EXISTS`，不改变版本号 |
-| 高于 `SCHEMA_VERSION` | 抛 `SchemaVersionError`，**保持原版本号不变**，拒绝读写 |
-| 低于 `SCHEMA_VERSION` 且有迁移步骤 | 按版本阶梯执行迁移 SQL，每步之后更新版本号 |
-| 低于 `SCHEMA_VERSION` 且无迁移步骤 | 抛 `SchemaVersionError`，拒绝自动升级 |
+| **`schema_meta` 表不存在**（真正的空库） | 建表并写入 `SCHEMA_VERSION` |
+| 版本等于 `SCHEMA_VERSION` | 幂等执行 `CREATE ... IF NOT EXISTS`，不改变版本号 |
+| 版本高于 `SCHEMA_VERSION` | 抛 `SchemaVersionError`，**保持原版本号不变**，拒绝读写 |
+| 版本低于 `SCHEMA_VERSION` 且有迁移步骤 | 按版本阶梯执行迁移 SQL，每步之后更新版本号 |
+| 版本低于 `SCHEMA_VERSION` 且无迁移步骤 | 抛 `SchemaVersionError`，拒绝自动升级 |
+| **`schema_meta` 表存在但缺 `schema_version` 记录** | 抛 `SchemaVersionError`：**不写版本号、不补齐缺失表、不接纳未知结构** |
 
-设计目的：**绝不静默降级由更新版本程序创建的数据库**，
-也绝不做"只改版本号而不迁移真实表结构"的假升级。
+关键规则：**只有"元数据表不存在"才允许按新数据库初始化。**
+
+"表不存在"与"表存在但缺版本记录"必须严格区分，两者都返回"没有版本"会导致
+后者被当作空库，进而把当前版本号写入一个结构未知的库——这是静默的数据破坏。
+因此 `Database._read_schema_state()` 返回 `(元数据表是否存在, 版本或哨兵)`，
+由 `MISSING_VERSION` 哨兵表达"表在但版本缺失"，与 `None`（表不存在）区分。
+
+对照场景：版本号**有效且等于当前版本**、但某张表被外部删掉时，
+属于"缺表"而非"缺版本"，允许用 `CREATE ... IF NOT EXISTS` 幂等补齐。
+
+设计目的：
+
+1. 绝不静默降级由更新版本程序创建的数据库；
+2. 绝不做"只改版本号而不迁移真实表结构"的假升级；
+3. 绝不把元数据不完整的库当作新库接纳。
 
 `Database.transaction()` 语义：
 

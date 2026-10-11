@@ -54,6 +54,27 @@ SCHEMA_VERSION = 1
 #: （例如 ``ALTER TABLE ... ADD COLUMN``）。禁止只改版本号而不迁移结构。
 MIGRATIONS: dict[int, tuple[str, ...]] = {}
 
+
+class _MissingVersion:
+    """哨兵：``schema_meta`` 表存在、但 ``schema_version`` 记录缺失。
+
+    必须与 ``None`` 区分开：``None`` 表示"``schema_meta`` 表都不存在"，
+    即数据库从未初始化过；而本哨兵表示元数据表已存在却没有版本记录，
+    属于元数据不完整，**不得**当作新数据库初始化。
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - 仅调试显示
+        return "MISSING_VERSION"
+
+    def __bool__(self) -> bool:
+        return False
+
+
+#: 版本记录缺失的哨兵值，见 :class:`_MissingVersion`。
+MISSING_VERSION = _MissingVersion()
+
 _PROJECT_TYPE_VALUES = "'industrial_commercial','utility_scale','other'"
 _DOCUMENT_TYPE_VALUES = "'electricity_bill','load_profile','tariff_document','other'"
 _PROCESSING_STATUS_VALUES = "'pending','parsed','failed','manual_review'"
@@ -308,14 +329,20 @@ class Database:
 
     模式版本保护
     ------------
-    :meth:`initialize_schema` 会先读取数据库中的模式版本：
+    :meth:`initialize_schema` 会先读取数据库中的模式元数据状态：
 
-    - 空数据库（无 ``schema_meta`` 表）→ 正常建表并写入当前版本；
+    - **``schema_meta`` 表不存在**（真正的空数据库）→ 正常建表并写入当前版本；
     - 版本等于当前支持版本 → 幂等执行，不重复变更；
     - 版本**高于**当前支持版本 → 抛 :class:`SchemaVersionError`，
       拒绝读写由更新版本程序创建的数据库（防止静默降级）；
     - 版本**低于**当前支持版本 → 抛 :class:`SchemaVersionError`，
-      并要求显式迁移（见 :data:`MIGRATIONS`），不做部分升级。
+      并要求显式迁移（见 :data:`MIGRATIONS`），不做部分升级；
+    - ``schema_meta`` 表**存在但缺少 ``schema_version`` 记录** →
+      抛 :class:`SchemaVersionError`。该情形与"空数据库"必须区分：
+      元数据表已存在说明这个库被初始化过，其结构版本不可知，
+      因此**不写版本号、不补齐缺失的表、不接纳未知结构**。
+
+    换言之：**只有元数据表不存在时，才允许按新数据库初始化。**
     """
 
     #: 便捷别名：映射到共享缓存内存库的 URI 模板（``{name}`` 为实例唯一名）
@@ -512,21 +539,32 @@ class Database:
         return row is not None
 
     @staticmethod
-    def _read_schema_version(conn: sqlite3.Connection) -> int | None:
-        """读取已写入的模式版本。
+    def _read_schema_state(conn: sqlite3.Connection) -> tuple[bool, object]:
+        """读取模式元数据状态。
+
+        与"读取版本号"不同，本方法**区分**以下三种情形（这是关键区别）：
+
+        1. ``schema_meta`` 表不存在 → ``(False, MISSING_VERSION)``：
+           数据库从未初始化过，可以按新数据库初始化。
+        2. ``schema_meta`` 表存在但缺少 ``schema_version`` 记录 →
+           ``(True, MISSING_VERSION)``：**元数据不完整**，属于数据库损坏或
+           外部篡改，不允许按新数据库初始化。
+        3. 记录存在 → ``(True, <非负整数>)``。
 
         Returns:
-            - ``None``：``schema_meta`` 表不存在（空数据库）或版本记录缺失；
-            - 非负整数：已记录的模式版本。
+            ``(meta_table_exists, version)``；``version`` 为整数或
+            :data:`MISSING_VERSION` 哨兵。
 
         Raises:
-            PersistenceError: 版本值存在但不是整数（数据库被外部破坏）。
+            PersistenceError: 版本值存在但不是合法整数（数据库被外部破坏）。
         """
         if not Database._meta_table_exists(conn):
-            return None
+            return False, MISSING_VERSION
+
         row = conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
-        if row is None:
-            return None
+        if row is None or row["value"] is None:
+            return True, MISSING_VERSION
+
         value = row["value"]
         try:
             version = int(str(value).strip())
@@ -540,7 +578,30 @@ class Database:
                 f"数据库模式版本记录非法（不允许负数）：{version}",
                 operation="initialize_schema",
             )
-        return version
+        return True, version
+
+    @staticmethod
+    def _read_schema_version(conn: sqlite3.Connection) -> int | None:
+        """读取已写入的模式版本（仅用于查询，不用于初始化判定）。
+
+        Returns:
+            - ``None``：``schema_meta`` 表不存在（数据库尚未初始化）；
+            - 非负整数：已记录的模式版本。
+
+        Raises:
+            PersistenceError: 元数据表存在但缺少版本记录，或版本值非法。
+                这两种情况都不能当成"新数据库"，因此不返回 ``None``。
+        """
+        meta_exists, version = Database._read_schema_state(conn)
+        if not meta_exists:
+            return None
+        if version is MISSING_VERSION:
+            raise PersistenceError(
+                "数据库元数据不完整：schema_meta 表存在但缺少 schema_version 记录。"
+                "无法确定该库的结构版本，已拒绝将其当作新数据库处理。",
+                operation="initialize_schema",
+            )
+        return int(version)  # type: ignore[arg-type]
 
     @property
     def supported_schema_version(self) -> int:
@@ -611,13 +672,36 @@ class Database:
 
         幂等：重复调用不会报错，也不会删除已有数据。
 
+        判定规则（顺序不可调换）：
+
+        1. ``schema_meta`` 表不存在 → 视为**真正的新数据库**，建表并写入版本号。
+        2. 版本等于当前支持版本 → 幂等执行 ``CREATE ... IF NOT EXISTS``，不改版本号。
+        3. 版本高于或低于当前支持版本 → 抛 :class:`SchemaVersionError`，不改版本号。
+        4. ``schema_meta`` 表**存在但缺少版本记录** → 抛 :class:`SchemaVersionError`，
+           **不改版本号、不补齐缺失的表、不接纳未知结构**。
+           仅有"元数据表不存在"才允许按新数据库初始化。
+
         Raises:
-            SchemaVersionError: 数据库模式版本与本程序不兼容（见类文档）。
+            SchemaVersionError: 数据库模式版本与本程序不兼容，或元数据不完整。
             PersistenceError: 数据库无法打开或写入。
         """
         self._require_open()
         with self.transaction() as conn:
-            stored = self._read_schema_version(conn)
+            meta_exists, version = self._read_schema_state(conn)
+
+            if meta_exists and version is MISSING_VERSION:
+                # 元数据表已存在却没有版本记录：结构版本不可知，拒绝猜测。
+                raise SchemaVersionError(
+                    "数据库元数据不完整：schema_meta 表已存在，但缺少 schema_version 记录。"
+                    "无法判断该库的结构版本，已拒绝初始化。"
+                    "为避免破坏既有数据，本程序不会把它当作新数据库、"
+                    "不会写入当前版本号、也不会补齐缺失的表。"
+                    "请先备份并使用与本数据库版本匹配的程序，或人工修复元数据。",
+                    found_version=None,
+                    supported_version=SCHEMA_VERSION,
+                )
+
+            stored: int | None = None if not meta_exists else int(version)  # type: ignore[arg-type]
             self._check_schema_version(stored)
 
             if stored == SCHEMA_VERSION:
@@ -628,7 +712,7 @@ class Database:
                 return
 
             if stored is None:
-                # 空数据库：正常初始化
+                # 真正的新数据库：正常初始化
                 self._apply_schema(conn)
                 return
 
@@ -646,11 +730,16 @@ class Database:
         return tuple(row["name"] for row in rows)
 
     def schema_version(self) -> int | None:
-        """返回已写入的模式版本；表或记录不存在时返回 ``None``。
+        """返回已写入的模式版本。
 
-        Note:
-            表不存在属于"尚未初始化"的正常情况，返回 ``None``；
-            但版本值本身非法时会抛 :class:`PersistenceError`，不会静默吞掉。
+        Returns:
+            - ``None``：``schema_meta`` 表不存在，即数据库尚未初始化
+              （这是合法状态，不是错误）；
+            - 非负整数：已记录的模式版本。
+
+        Raises:
+            PersistenceError: ``schema_meta`` 表存在但缺少版本记录，
+                或版本值非法。这两种情况都不能沉默地当作"未初始化"。
         """
         with self.transaction() as conn:
             return self._read_schema_version(conn)
@@ -832,6 +921,7 @@ class ProjectRepository:
 __all__ = [
     "BUSINESS_TABLES",
     "MIGRATIONS",
+    "MISSING_VERSION",
     "Database",
     "ProjectRepository",
     "SCHEMA_STATEMENTS",

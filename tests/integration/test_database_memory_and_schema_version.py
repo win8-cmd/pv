@@ -356,15 +356,177 @@ class TestSchemaVersionProtection:
         assert issubclass(SchemaVersionError, PersistenceError)
         assert issubclass(SchemaVersionError, CENEPError)
 
-    def test_missing_version_row_in_existing_meta_table(self, db_path: Path) -> None:
-        """schema_meta 存在但缺版本记录时，视为待初始化并写入当前版本。"""
+
+class TestMissingVersionRecordIsNotTreatedAsNewDatabase:
+    """元数据表存在但缺版本记录时，不得当作新数据库初始化。
+
+    这是与"空数据库"必须严格区分的场景：
+
+    - ``schema_meta`` 表**不存在** → 真正的空库，允许初始化；
+    - ``schema_meta`` 表**存在但缺 ``schema_version`` 记录** → 元数据不完整，
+      结构版本不可知，必须拒绝，且**不得**写版本号或补齐缺失的表。
+    """
+
+    @staticmethod
+    def _delete_version_row(db: Database) -> None:
+        with db.transaction() as conn:
+            conn.execute("DELETE FROM schema_meta WHERE key = 'schema_version'")
+
+    def test_schema_version_query_rejects_missing_record(self, db_path: Path) -> None:
+        """查询版本号时也必须报错，不能沉默返回 None（None 专指空库）。"""
+        db = Database(db_path)
+        db.initialize_schema()
+        self._delete_version_row(db)
+
+        with pytest.raises(PersistenceError) as excinfo:
+            db.schema_version()
+        assert "元数据不完整" in str(excinfo.value)
+
+    def test_initialize_rejects_missing_version_record(self, db_path: Path) -> None:
+        """初始化必须抛 SchemaVersionError，而不是写入当前版本号。"""
+        db = Database(db_path)
+        db.initialize_schema()
+        self._delete_version_row(db)
+
+        with pytest.raises(SchemaVersionError) as excinfo:
+            db.initialize_schema()
+        error = excinfo.value
+        assert error.found_version is None
+        assert error.supported_version == SCHEMA_VERSION
+        assert "元数据不完整" in str(error)
+
+    def test_initialize_does_not_write_current_version(self, db_path: Path) -> None:
+        """核心回归：拒绝之后，版本记录必须仍然缺失，没有被写入当前版本号。"""
+        db = Database(db_path)
+        db.initialize_schema()
+        self._delete_version_row(db)
+
+        with pytest.raises(SchemaVersionError):
+            db.initialize_schema()
+
+        with db.transaction() as conn:
+            row = conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
+        assert row is None, "不得擅自补写 schema_version"
+        with pytest.raises(PersistenceError):
+            db.schema_version()
+
+    def test_initialize_does_not_adopt_structure_when_other_tables_exist(self, db_path: Path) -> None:
+        """其他业务表仍存在时，初始化不得补齐缺表、也不得接纳未知结构。
+
+        构造一个"看起来像旧结构"的库：删掉 report 表、再删掉版本记录。
+        初始化被拒绝后，这个库必须保持原样——既不写版本号，也不把 report 建回来。
+        """
         db = Database(db_path)
         db.initialize_schema()
         with db.transaction() as conn:
-            conn.execute("DELETE FROM schema_meta WHERE key = 'schema_version'")
-        assert db.schema_version() is None
+            conn.execute("DROP TABLE report")
+        tables_before = set(db.table_names())
+        assert "report" not in tables_before
+        assert "project" in tables_before, "其余业务表必须仍然存在"
+        self._delete_version_row(db)
+
+        with pytest.raises(SchemaVersionError):
+            db.initialize_schema()
+
+        assert set(db.table_names()) == tables_before, "被拒绝的初始化不得改动表结构"
+        with db.transaction() as conn:
+            row = conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
+        assert row is None
+
+    def test_business_data_survives_rejected_initialization(self, db_path: Path) -> None:
+        """被拒绝的初始化不得影响既有业务数据。"""
+        db = Database(db_path)
+        db.initialize_schema()
+        repository = ProjectRepository(db)
+        project = repository.add(Project(name="元数据损坏前写入的项目"))
+        self._delete_version_row(db)
+
+        with pytest.raises(SchemaVersionError):
+            db.initialize_schema()
+
+        assert repository.count() == 1
+        assert repository.get(project.project_id) is not None
+
+    def test_null_version_value_is_not_treated_as_new_database(self, db_path: Path) -> None:
+        """版本记录存在但值为 NULL，同样属于元数据不完整。
+
+        注意：正式建表语句中 ``schema_meta.value`` 是 ``NOT NULL``，
+        因此这里重建一张允许 NULL 的同名表，模拟被外部工具改坏的库。
+        """
+        db = Database(db_path)
+        db.initialize_schema()
+        with db.transaction() as conn:
+            conn.execute("DROP TABLE schema_meta")
+            conn.execute("CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT)")
+            conn.execute("INSERT INTO schema_meta(key, value) VALUES('schema_version', NULL)")
+
+        with pytest.raises(PersistenceError):
+            db.schema_version()
+        with pytest.raises(SchemaVersionError):
+            db.initialize_schema()
+        with db.transaction() as conn:
+            row = conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
+        assert row["value"] is None, "不得把 NULL 改写为当前版本"
+
+    def test_empty_meta_table_without_version_is_rejected(self, db_path: Path) -> None:
+        """schema_meta 表存在但完全为空：仍属元数据不完整，不得当新库。"""
+        db = Database(db_path)
+        db.initialize_schema()
+        with db.transaction() as conn:
+            conn.execute("DELETE FROM schema_meta")
+
+        with pytest.raises(SchemaVersionError):
+            db.initialize_schema()
+        with db.transaction() as conn:
+            assert conn.execute("SELECT COUNT(*) AS n FROM schema_meta").fetchone()["n"] == 0
+
+    def test_truly_empty_database_is_still_initializable(self, db_path: Path) -> None:
+        """对照组：schema_meta 表不存在时，仍必须能正常初始化。"""
+        db = Database(db_path)
+        assert db.schema_version() is None  # None 专指"表不存在"
         db.initialize_schema()
         assert db.schema_version() == SCHEMA_VERSION
+
+    def test_metadata_table_existing_alone_is_rejected(self, db_path: Path) -> None:
+        """只有 schema_meta 表、没有任何业务表、且无版本记录的半成品库，必须拒绝。"""
+        db = Database(db_path)
+        # 直接构造"只有一个空元数据表"的库
+        with db.transaction() as conn:
+            conn.execute("CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        assert db.table_names() == ("schema_meta",)
+
+        with pytest.raises(SchemaVersionError):
+            db.initialize_schema()
+
+        assert db.table_names() == ("schema_meta",), "不得补齐业务表"
+        with db.transaction() as conn:
+            assert conn.execute("SELECT COUNT(*) AS n FROM schema_meta").fetchone()["n"] == 0
+
+    def test_current_version_with_missing_tables_is_repaired(self, db_path: Path) -> None:
+        """对照场景：版本号有效但表被删掉，属于"缺表"，应幂等补齐。
+
+        这与"缺版本记录"是不同性质的问题：结构版本明确（等于当前版本），
+        因此允许用 CREATE TABLE IF NOT EXISTS 修复。
+        """
+        db = Database(db_path)
+        db.initialize_schema()
+        with db.transaction() as conn:
+            conn.execute("DROP TABLE report")
+        assert "report" not in db.table_names()
+
+        db.initialize_schema()
+
+        assert "report" in db.table_names()
+        assert db.schema_version() == SCHEMA_VERSION
+
+    def test_sentinel_is_distinct_from_none(self) -> None:
+        """哨兵必须与 None 可区分，且为假值以便书写 `version or ...`。"""
+        from cenep.infrastructure.database import MISSING_VERSION
+
+        assert MISSING_VERSION is not None
+        assert MISSING_VERSION != None  # noqa: E711 - 明确对比 None
+        assert not MISSING_VERSION
+        assert repr(MISSING_VERSION) == "MISSING_VERSION"
 
 
 # ---------------------------------------------------------------------------

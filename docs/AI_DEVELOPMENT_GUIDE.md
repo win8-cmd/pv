@@ -97,7 +97,7 @@ total = sum(min(l, p) for l, p in zip(load, pv))
    .venv\Scripts\python.exe -m pytest -q
    ```
 
-   基线期望：`234 passed`（2026 年第一阶段现状；数量会随新增测试增长，关键是 `0 failed`）。
+   基线期望：`244 passed`（2026 年第一阶段现状；数量会随新增测试增长，关键是 `0 failed`）。
 
 3. **小步修改**：一次只改一个关注点。不顺手重构无关代码，不格式化整个文件，不修改不属于本次任务的测试。
 4. **同步文档**：口径变化同步 `docs/CALCULATION_SPEC.md`；数据模型变化同步 `docs/DATA_MODEL.md`；架构或流程规则变化同步本文档（必要时同步 `docs/ARCHITECTURE.md`）。
@@ -168,6 +168,16 @@ total = sum(min(l, p) for l, p in zip(load, pv))
 1. **修改 `src/cenep/domain/models.py`**：新增/修改实体字段、枚举值与默认值。枚举取值必须与数据库 `CHECK` 约束一致。
 2. **修改 `src/cenep/infrastructure/database.py` 中的 `SCHEMA_STATEMENTS`**：同步建表语句、`CHECK` 约束、外键与索引；如新增业务表，同步更新 `BUSINESS_TABLES`（`tests/integration/test_database.py::TestSchemaInitialization::test_initialize_creates_all_tables` 会逐表核对）。
 3. **提升 `SCHEMA_VERSION`**（当前值为 `1`）。该值由 `Database.initialize_schema()` 写入 `schema_meta` 表。
+
+   > **元数据完整性红线**：`Database._read_schema_state()` 返回
+   > `(元数据表是否存在, 版本或 MISSING_VERSION 哨兵)`。
+   > **只有 `schema_meta` 表不存在时，才允许按新数据库初始化。**
+   > 若表存在但缺 `schema_version` 记录，`initialize_schema()` 会抛
+   > `SchemaVersionError`，且**不写版本号、不补齐缺失表、不接纳未知结构**。
+   > 不要试图"顺手补一个版本号"——结构版本未知时补版本号等于静默破坏数据。
+   > 不要把 `MISSING_VERSION` 与 `None` 混为一谈：`None` 专指元数据表不存在。
+   > 该行为由 `tests/integration/test_database_memory_and_schema_version.py::TestMissingVersionRecordIsNotTreatedAsNewDatabase`
+   > 逐条断言（含"其他业务表仍存在时初始化不改动结构"）。
 4. **在迁移注册表 `MIGRATIONS` 中登记真实的表结构变更**（`src/cenep/infrastructure/database.py`）。
    现状：`MIGRATIONS: dict[int, tuple[str, ...]] = {}` 已就位，键为**升级前**版本号，
    值为把该版本升级到 `键 + 1` 的 SQL 序列；`Database._apply_migrations()` 会按阶梯
@@ -483,6 +493,6 @@ AI 开发者向用户或上游智能体汇报时，必须遵守：
 2. **不得编造测试结果**。不得写"测试已全部通过"而实际未运行。
 3. **未验证事项必须显式标注**：写明未验证的内容、原因（如无显示器环境、缺依赖）、以及验证所需的具体命令。
 4. **区分"已实现 / 未实现 / 部分实现"**，并说明各自的边界。不要用"基本完成""应该没问题"这类模糊表述代替事实。
-5. **报告必须包含证据**：运行的命令、观测到的结果（如 `234 passed`）、改动的文件清单、以及 git 状态核查结论（本地提交还是已推送）。
+5. **报告必须包含证据**：运行的命令、观测到的结果（如 `244 passed`）、改动的文件清单、以及 git 状态核查结论（本地提交还是已推送）。
 6. **测试通过数量与耗时以实际输出为准**，不要凭记忆填写。
 7. **遇到阻塞要直说**：明确指出是哪一条规则或哪一个测试挡住了进展，不要绕过规则实现"看起来能跑"的版本。

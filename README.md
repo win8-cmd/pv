@@ -32,7 +32,7 @@ CENEP 是一款面向**中国工商业分布式光伏项目**的经济评价桌�
 
 ## 2. 当前版本已实现的功能
 
-以下功能**已实现且有自动化测试覆盖**（234 个用例全部通过）：
+以下功能**已实现且有自动化测试覆盖**（244 个用例全部通过）：
 
 | 功能 | 说明 |
 |---|---|
@@ -252,10 +252,10 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\.venv\Scripts\python.exe -m pytest --cov=cenep --cov-report=term-missing
 ```
 
-**预期结果：** `234 passed`（0 失败、0 错误、0 跳过）。
+**预期结果：** `244 passed`（0 失败、0 错误、0 跳过）。
 
 用例分布：单元与界面测试 148 个（校验 52、消纳计算 42、架构约束 16、包与命令行 21、界面 17），
-集成测试 86 个（SQLite 建表、CRUD、事务、约束与异常分类 51；内存数据库与模式版本保护 35）。
+集成测试 96 个（SQLite 建表、CRUD、事务、约束与异常分类 51；内存库、模式版本保护与元数据完整性 45）。
 
 界面测试使用 Qt 的 `offscreen` 平台，在无显示器的环境中也能真实创建窗口：
 
@@ -386,7 +386,7 @@ pv/  (仓库根目录)
    请使用 `.\.venv\Scripts\python.exe` 或 `py` 启动器。
 
 > **CI 状态：** `.github/workflows/tests.yml` 已在 GitHub Actions 上实际运行通过，
-> Python 3.14 与 3.11 两个作业均为 `234 passed`，无跳过用例。详见
+> Python 3.14 与 3.11 两个作业均为 `244 passed`，无跳过用例。详见
 > [docs/ACCEPTANCE_CRITERIA.md](docs/ACCEPTANCE_CRITERIA.md) 第 5.2 节。
 
 ## 11. 文档索引
