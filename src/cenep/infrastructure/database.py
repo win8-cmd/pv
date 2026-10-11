@@ -20,14 +20,17 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, Sequence
+from typing import Any, ClassVar, Iterator, Sequence
 
 from cenep.domain.exceptions import (
     EntityAlreadyExistsError,
     EntityNotFoundError,
     PersistenceError,
+    SchemaVersionError,
     ValidationError,
 )
 from cenep.domain.models import Project, utc_now_iso
@@ -39,6 +42,38 @@ from cenep.domain.validation import require_valid_project
 
 SCHEMA_VERSION = 1
 """数据库模式版本，写入 ``schema_meta`` 表。"""
+
+#: 迁移步骤注册表：``{起始版本: (迁移 SQL, ...)}``。
+#:
+#: 键为**升级前**的版本号，值为把该版本升级到 ``键 + 1`` 所需的 SQL 语句序列。
+#: :meth:`Database.initialize_schema` 会按版本阶梯依次执行，并在每一步之后
+#: 更新 ``schema_meta`` 中的版本号。
+#:
+#: **当前为空**：``SCHEMA_VERSION == 1`` 尚无历史版本需要迁移。
+#: 一旦把 ``SCHEMA_VERSION`` 提升到 2，必须在此登记从 1 到 2 的**真实表结构变更**
+#: （例如 ``ALTER TABLE ... ADD COLUMN``）。禁止只改版本号而不迁移结构。
+MIGRATIONS: dict[int, tuple[str, ...]] = {}
+
+
+class _MissingVersion:
+    """哨兵：``schema_meta`` 表存在、但 ``schema_version`` 记录缺失。
+
+    必须与 ``None`` 区分开：``None`` 表示"``schema_meta`` 表都不存在"，
+    即数据库从未初始化过；而本哨兵表示元数据表已存在却没有版本记录，
+    属于元数据不完整，**不得**当作新数据库初始化。
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - 仅调试显示
+        return "MISSING_VERSION"
+
+    def __bool__(self) -> bool:
+        return False
+
+
+#: 版本记录缺失的哨兵值，见 :class:`_MissingVersion`。
+MISSING_VERSION = _MissingVersion()
 
 _PROJECT_TYPE_VALUES = "'industrial_commercial','utility_scale','other'"
 _DOCUMENT_TYPE_VALUES = "'electricity_bill','load_profile','tariff_document','other'"
@@ -258,20 +293,131 @@ BUSINESS_TABLES: tuple[str, ...] = (
 class Database:
     """SQLite 数据库连接与模式管理。
 
-    用法::
+    支持两种模式：
 
-        db = Database(":memory:")
+    **文件数据库**（默认）::
+
+        db = Database(r"D:\\data\\cenep.db")
         db.initialize_schema()
         with db.transaction() as conn:
             ...
 
-    每次 :meth:`transaction` 都会开启 ``PRAGMA foreign_keys = ON``，
-    并在退出时提交或回滚；不使用全局共享连接，避免线程安全问题。
+    **内存数据库**（URI 形式，推荐显式写法）::
+
+        db = Database("file:cenep?mode=memory&cache=shared", uri=True)
+
+    也接受便捷别名 ``Database(":memory:")``，内部转换为**共享缓存**内存库。
+
+    内存库为何必须用共享缓存
+    ------------------------
+    SQLite 的普通内存库（``mode=memory`` 且不共享）**按连接隔离**，
+    连接一旦关闭，其中的数据立即消失。而本类的 :meth:`transaction`
+    每次都会新建连接、结束即关闭，因此"普通内存库"在本设计中根本不可用：
+    初始化建表后连接关闭 → 表随之消失 → 下一个事务报
+    ``no such table``。
+
+    共享缓存内存库（``cache=shared``）的生命周期由**仍处于打开状态的连接**
+    决定。本类因此持有一个常驻的"锚定连接"（anchor connection），
+    只要 ``Database`` 实例存活且未被关闭，内存库及其中的表和数据就持续可见。
+
+    使用约定：
+
+    1. 内存库必须由创建它的同一个 ``Database`` 实例使用；
+       跨实例共享同一内存库名有风险（实例销毁后库即消失）。
+    2. 不再使用时应调用 :meth:`close`（或使用 ``with`` 语句）释放锚定连接。
+    3. 内存库不支持 WAL；``PRAGMA foreign_keys`` 在所有模式下一律开启。
+
+    模式版本保护
+    ------------
+    :meth:`initialize_schema` 会先读取数据库中的模式元数据状态：
+
+    - **``schema_meta`` 表不存在**（真正的空数据库）→ 正常建表并写入当前版本；
+    - 版本等于当前支持版本 → 幂等执行，不重复变更；
+    - 版本**高于**当前支持版本 → 抛 :class:`SchemaVersionError`，
+      拒绝读写由更新版本程序创建的数据库（防止静默降级）；
+    - 版本**低于**当前支持版本 → 抛 :class:`SchemaVersionError`，
+      并要求显式迁移（见 :data:`MIGRATIONS`），不做部分升级；
+    - ``schema_meta`` 表**存在但缺少 ``schema_version`` 记录** →
+      抛 :class:`SchemaVersionError`。该情形与"空数据库"必须区分：
+      元数据表已存在说明这个库被初始化过，其结构版本不可知，
+      因此**不写版本号、不补齐缺失的表、不接纳未知结构**。
+
+    换言之：**只有元数据表不存在时，才允许按新数据库初始化。**
     """
 
-    def __init__(self, path: str | Path) -> None:
-        self.path = str(path)
-        self._is_memory = self.path == ":memory:"
+    #: 便捷别名：映射到共享缓存内存库的 URI 模板（``{name}`` 为实例唯一名）
+    MEMORY_ALIASES: ClassVar[dict[str, str]] = {":memory:": "file:{name}?mode=memory&cache=shared"}
+
+    def __init__(self, path: str | Path, *, uri: bool = False) -> None:
+        # 每个实例一个唯一的内存库名，保证不同实例互不可见
+        self._memory_name = f"cenep_mem_{uuid.uuid4().hex}"
+
+        raw_path = str(path)
+        alias_template = self.MEMORY_ALIASES.get(raw_path) if not uri else None
+        if alias_template is not None:
+            # 便捷别名（如 ":memory:"）→ 实例唯一的共享缓存内存库
+            self.path = alias_template.format(name=self._memory_name)
+            self.uri = True
+            self.is_memory = True
+        else:
+            self.path = raw_path
+            # 内存 URI（含 mode=memory）必须走 uri 模式，即使调用方未显式声明，
+            # 否则 sqlite3 会把它当成普通文件名。
+            self.uri = uri or self._detect_memory_uri(raw_path)
+            self.is_memory = self.uri and self._detect_memory_uri(raw_path)
+
+        # 锚定连接：使共享缓存内存库在整个实例生命周期内存活
+        self._anchor: sqlite3.Connection | None = None
+        self._closed = False
+        self._lock = threading.RLock()
+
+    # -- 路径与生命周期 -------------------------------------------------
+    @staticmethod
+    def _detect_memory_uri(path: str) -> bool:
+        """判断 URI 形式的路径是否为内存库。"""
+        lowered = path.lower()
+        return lowered.startswith("file::memory:") or "mode=memory" in lowered
+
+    @staticmethod
+    def _display_path(path: str) -> str:
+        """返回便于阅读与日志记录的路径（隐藏内存库内部实现细节）。"""
+        lowered = path.lower()
+        if lowered.startswith("file:") and ("mode=memory" in lowered or lowered.startswith("file::memory:")):
+            return ":memory:"
+        return path
+
+    def __enter__(self) -> "Database":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:  # pragma: no cover - 依赖垃圾回收时机
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        """释放锚定连接（内存库的数据随之消失）。幂等。
+
+        文件数据库无需关闭任何常驻资源，调用本方法只标记实例已关闭。
+        """
+        with self._lock:
+            anchor, self._anchor = self._anchor, None
+            self._closed = True
+        if anchor is not None:
+            try:
+                anchor.close()
+            except sqlite3.Error:  # pragma: no cover - 关闭失败不影响后续
+                pass
+
+    def _require_open(self) -> None:
+        if self._closed:
+            raise PersistenceError(
+                "数据库连接已关闭，无法继续使用该实例。",
+                operation="connect",
+            )
 
     # -- 连接 -----------------------------------------------------------
     def exists(self) -> bool:
@@ -279,27 +425,69 @@ class Database:
 
         用于区分"新建库"与"打开已有库"：只读操作不应凭空创建空库文件。
         """
-        if self._is_memory:
+        if self.is_memory:
             return True
         return Path(self.path).exists()
+
+    def _ensure_anchor(self) -> None:
+        """确保共享缓存内存库的锚定连接存在。"""
+        if self._anchor is not None:
+            return
+        with self._lock:
+            if self._anchor is not None:
+                return
+            if self.uri:
+                uri = self._shared_memory_uri()
+            else:
+                # 第一次打开内存库时按共享缓存模式创建它
+                uri = f"file:{self._memory_name}?mode=memory&cache=shared"
+            conn = sqlite3.connect(uri, uri=True, isolation_level=None, timeout=10.0)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys = ON")
+            self._anchor = conn
+
+    def _shared_memory_uri(self) -> str:
+        """把用户提供的 URI 改写为共享缓存形式。
+
+        用户无需记住 ``cache=shared``；若其 URI 使用 ``mode=memory`` 却未声明
+        共享缓存，本方法会自动补上，否则数据将按连接隔离而无法跨事务读取。
+        """
+        if "cache=" in self.path:
+            return self.path
+        separator = "&" if "?" in self.path else "?"
+        return f"{self.path}{separator}cache=shared"
 
     def connect(self) -> sqlite3.Connection:
         """新建一个已配置好的连接（调用方负责关闭）。
 
         Raises:
-            PersistenceError: 无法打开数据库文件。
+            PersistenceError: 无法打开数据库或配置连接。
         """
+        self._require_open()
         try:
-            conn = sqlite3.connect(self.path, isolation_level=None, timeout=10.0)
-        except sqlite3.Error as exc:  # pragma: no cover - 依赖文件系统故障
-            raise PersistenceError(f"无法打开数据库：{self.path}（{exc}）", operation="connect") from exc
+            if self.is_memory:
+                self._ensure_anchor()
+                conn = sqlite3.connect(
+                    self._shared_memory_uri(),
+                    uri=True,
+                    isolation_level=None,
+                    timeout=10.0,
+                )
+            else:
+                conn = sqlite3.connect(self.path, isolation_level=None, timeout=10.0)
+        except sqlite3.Error as exc:
+            raise PersistenceError(
+                f"无法打开数据库：{self._display_path(self.path)}（{exc}）",
+                operation="connect",
+            ) from exc
+
         conn.row_factory = sqlite3.Row
         try:
             conn.execute("PRAGMA foreign_keys = ON")
-            if not self._is_memory:
+            if not self.is_memory:
                 # WAL 提升并发读性能；内存库不支持。
                 conn.execute("PRAGMA journal_mode = WAL")
-        except sqlite3.Error as exc:  # pragma: no cover
+        except sqlite3.Error as exc:  # pragma: no cover - 取决于驱动状态
             conn.close()
             raise PersistenceError(f"数据库 PRAGMA 配置失败：{exc}", operation="configure") from exc
         return conn
@@ -336,19 +524,202 @@ class Database:
             conn.close()
 
     # -- 模式 -----------------------------------------------------------
-    def initialize_schema(self) -> None:
-        """创建全部数据表与索引，并写入模式版本。
+    @staticmethod
+    def _meta_table_exists(conn: sqlite3.Connection) -> bool:
+        """``schema_meta`` 表是否已存在。"""
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta'"
+        ).fetchone()
+        if row is not None:
+            return True
+        # 兼容大小写差异（SQLite 对象名不区分大小写）
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND lower(name) = 'schema_meta'"
+        ).fetchone()
+        return row is not None
 
-        幂等：重复调用不会报错，也不会删除已有数据。
+    @staticmethod
+    def _read_schema_state(conn: sqlite3.Connection) -> tuple[bool, object]:
+        """读取模式元数据状态。
+
+        与"读取版本号"不同，本方法**区分**以下三种情形（这是关键区别）：
+
+        1. ``schema_meta`` 表不存在 → ``(False, MISSING_VERSION)``：
+           数据库从未初始化过，可以按新数据库初始化。
+        2. ``schema_meta`` 表存在但缺少 ``schema_version`` 记录 →
+           ``(True, MISSING_VERSION)``：**元数据不完整**，属于数据库损坏或
+           外部篡改，不允许按新数据库初始化。
+        3. 记录存在 → ``(True, <非负整数>)``。
+
+        Returns:
+            ``(meta_table_exists, version)``；``version`` 为整数或
+            :data:`MISSING_VERSION` 哨兵。
+
+        Raises:
+            PersistenceError: 版本值存在但不是合法整数（数据库被外部破坏）。
         """
-        with self.transaction() as conn:
-            for statement in SCHEMA_STATEMENTS:
+        if not Database._meta_table_exists(conn):
+            return False, MISSING_VERSION
+
+        row = conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
+        if row is None or row["value"] is None:
+            return True, MISSING_VERSION
+
+        value = row["value"]
+        try:
+            version = int(str(value).strip())
+        except (TypeError, ValueError) as exc:
+            raise PersistenceError(
+                f"数据库模式版本记录非法（期望整数）：{value!r}",
+                operation="initialize_schema",
+            ) from exc
+        if version < 0:
+            raise PersistenceError(
+                f"数据库模式版本记录非法（不允许负数）：{version}",
+                operation="initialize_schema",
+            )
+        return True, version
+
+    @staticmethod
+    def _read_schema_version(conn: sqlite3.Connection) -> int | None:
+        """读取已写入的模式版本（仅用于查询，不用于初始化判定）。
+
+        Returns:
+            - ``None``：``schema_meta`` 表不存在（数据库尚未初始化）；
+            - 非负整数：已记录的模式版本。
+
+        Raises:
+            PersistenceError: 元数据表存在但缺少版本记录，或版本值非法。
+                这两种情况都不能当成"新数据库"，因此不返回 ``None``。
+        """
+        meta_exists, version = Database._read_schema_state(conn)
+        if not meta_exists:
+            return None
+        if version is MISSING_VERSION:
+            raise PersistenceError(
+                "数据库元数据不完整：schema_meta 表存在但缺少 schema_version 记录。"
+                "无法确定该库的结构版本，已拒绝将其当作新数据库处理。",
+                operation="initialize_schema",
+            )
+        return int(version)  # type: ignore[arg-type]
+
+    @property
+    def supported_schema_version(self) -> int:
+        """本程序当前支持的模式版本。"""
+        return SCHEMA_VERSION
+
+    def _check_schema_version(self, stored: int | None) -> None:
+        """校验数据库模式版本是否可被本程序安全使用。
+
+        Raises:
+            SchemaVersionError: 版本高于或低于当前支持版本。
+        """
+        if stored is None or stored == SCHEMA_VERSION:
+            return
+        if stored > SCHEMA_VERSION:
+            raise SchemaVersionError(
+                f"数据库模式版本（{stored}）高于本程序支持的版本（{SCHEMA_VERSION}），"
+                "已拒绝打开以避免破坏数据。该数据库可能由更新版本的 CENEP 创建，"
+                "请升级本程序后再使用。",
+                found_version=stored,
+                supported_version=SCHEMA_VERSION,
+            )
+        # stored < SCHEMA_VERSION
+        if stored in MIGRATIONS:
+            return
+        raise SchemaVersionError(
+            f"数据库模式版本（{stored}）低于本程序支持的版本（{SCHEMA_VERSION}），"
+            "且没有可用的迁移步骤，已拒绝自动升级。"
+            "仅修改版本号而不迁移真实表结构会导致数据损坏，因此本程序不做静默升级；"
+            "请先备份数据并使用与本数据库版本匹配的程序，或提供显式迁移脚本。",
+            found_version=stored,
+            supported_version=SCHEMA_VERSION,
+        )
+
+    def _apply_schema(self, conn: sqlite3.Connection) -> None:
+        """建表建索引并写入当前模式版本。"""
+        for statement in SCHEMA_STATEMENTS:
+            conn.execute(statement)
+        conn.execute(
+            "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (str(SCHEMA_VERSION),),
+        )
+
+    def _apply_migrations(self, conn: sqlite3.Connection, from_version: int) -> None:
+        """按阶梯顺序执行迁移步骤，真实迁移表结构后再更新版本号。"""
+        version = from_version
+        while version < SCHEMA_VERSION:
+            steps = MIGRATIONS.get(version)
+            if not steps:
+                raise SchemaVersionError(
+                    f"缺少从模式版本 {version} 升级到 {version + 1} 的迁移步骤，"
+                    "已停止升级以避免仅改版本号而不迁移表结构。",
+                    found_version=from_version,
+                    supported_version=SCHEMA_VERSION,
+                )
+            for statement in steps:
                 conn.execute(statement)
+            version += 1
             conn.execute(
                 "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (str(SCHEMA_VERSION),),
+                (str(version),),
             )
+
+    def initialize_schema(self) -> None:
+        """创建或校验数据表结构，并按需执行迁移。
+
+        幂等：重复调用不会报错，也不会删除已有数据。
+
+        判定规则（顺序不可调换）：
+
+        1. ``schema_meta`` 表不存在 → 视为**真正的新数据库**，建表并写入版本号。
+        2. 版本等于当前支持版本 → 幂等执行 ``CREATE ... IF NOT EXISTS``，不改版本号。
+        3. 版本高于或低于当前支持版本 → 抛 :class:`SchemaVersionError`，不改版本号。
+        4. ``schema_meta`` 表**存在但缺少版本记录** → 抛 :class:`SchemaVersionError`，
+           **不改版本号、不补齐缺失的表、不接纳未知结构**。
+           仅有"元数据表不存在"才允许按新数据库初始化。
+
+        Raises:
+            SchemaVersionError: 数据库模式版本与本程序不兼容，或元数据不完整。
+            PersistenceError: 数据库无法打开或写入。
+        """
+        self._require_open()
+        with self.transaction() as conn:
+            meta_exists, version = self._read_schema_state(conn)
+
+            if meta_exists and version is MISSING_VERSION:
+                # 元数据表已存在却没有版本记录：结构版本不可知，拒绝猜测。
+                raise SchemaVersionError(
+                    "数据库元数据不完整：schema_meta 表已存在，但缺少 schema_version 记录。"
+                    "无法判断该库的结构版本，已拒绝初始化。"
+                    "为避免破坏既有数据，本程序不会把它当作新数据库、"
+                    "不会写入当前版本号、也不会补齐缺失的表。"
+                    "请先备份并使用与本数据库版本匹配的程序，或人工修复元数据。",
+                    found_version=None,
+                    supported_version=SCHEMA_VERSION,
+                )
+
+            stored: int | None = None if not meta_exists else int(version)  # type: ignore[arg-type]
+            self._check_schema_version(stored)
+
+            if stored == SCHEMA_VERSION:
+                # 幂等路径：表结构已是最新，仍执行一次 CREATE IF NOT EXISTS，
+                # 以修复被外部删掉的索引或缺表（不改变版本号语义）。
+                for statement in SCHEMA_STATEMENTS:
+                    conn.execute(statement)
+                return
+
+            if stored is None:
+                # 真正的新数据库：正常初始化
+                self._apply_schema(conn)
+                return
+
+            # stored < SCHEMA_VERSION 且存在迁移步骤：先迁移，再补齐缺失结构
+            self._apply_migrations(conn, stored)
+            for statement in SCHEMA_STATEMENTS:
+                conn.execute(statement)
 
     def table_names(self) -> tuple[str, ...]:
         """返回当前库中全部用户表名（已排序）。"""
@@ -359,13 +730,19 @@ class Database:
         return tuple(row["name"] for row in rows)
 
     def schema_version(self) -> int | None:
-        """返回已写入的模式版本；表或记录不存在时返回 ``None``。"""
-        try:
-            with self.transaction() as conn:
-                row = conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
-        except PersistenceError:
-            return None
-        return int(row["value"]) if row else None
+        """返回已写入的模式版本。
+
+        Returns:
+            - ``None``：``schema_meta`` 表不存在，即数据库尚未初始化
+              （这是合法状态，不是错误）；
+            - 非负整数：已记录的模式版本。
+
+        Raises:
+            PersistenceError: ``schema_meta`` 表存在但缺少版本记录，
+                或版本值非法。这两种情况都不能沉默地当作"未初始化"。
+        """
+        with self.transaction() as conn:
+            return self._read_schema_version(conn)
 
 
 # ---------------------------------------------------------------------------
@@ -543,6 +920,8 @@ class ProjectRepository:
 
 __all__ = [
     "BUSINESS_TABLES",
+    "MIGRATIONS",
+    "MISSING_VERSION",
     "Database",
     "ProjectRepository",
     "SCHEMA_STATEMENTS",

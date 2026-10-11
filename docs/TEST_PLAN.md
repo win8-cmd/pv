@@ -1,21 +1,29 @@
 # CENEP 测试计划（TEST PLAN）
 
-- 文档版本：`2026.02-stage1`
+- 文档版本：`2026.10-stage1-r4`
 - 软件版本：`0.1.0`
 - 对应测试目录：`tests/`
-- 当前基线：**199 个用例，全部通过**（实测结果见 `docs/ACCEPTANCE_CRITERIA.md`）
+- 当前基线：**244 个用例，全部通过**（实测结果见 `docs/ACCEPTANCE_CRITERIA.md`）
+- 最近一次实测：2026-10-11，Python 3.14.7，Windows 11，`244 passed`
 
 按文件分布（实测 `pytest --collect-only -q` 输出）：
 
 | 测试文件 | 用例数 | 层次 |
 |---|---:|---|
-| `tests/unit/test_validation.py` | 52 | 单元 |
-| `tests/unit/test_self_consumption.py` | 42 | 单元 |
+| `tests/integration/test_database.py` | 51 | 集成 |
+| `tests/integration/test_database_memory_and_schema_version.py` | 45 | 集成（内存库与模式版本保护） |
+| `tests/unit/test_gui_main_window.py` | 17 | 界面（标记 `gui`） |
 | `tests/unit/test_layering.py` | 16 | 单元（架构约束） |
 | `tests/unit/test_package_import.py` | 21 | 单元 / 应用验证 |
-| `tests/unit/test_gui_main_window.py` | 17 | 界面（标记 `gui`） |
-| `tests/integration/test_database.py` | 51 | 集成 |
-| **合计** | **199** | |
+| `tests/unit/test_self_consumption.py` | 42 | 单元 |
+| `tests/unit/test_validation.py` | 52 | 单元 |
+| **合计** | **244** | |
+
+小计：单元与界面测试 148 个，集成测试 96 个。
+
+> 用例数量随缺陷修复与功能增加而变化。判断质量的标准是
+> **`0 failed`、`0 error`、`0 skipped`**，而不是数量本身。
+> 每次修改后必须重新运行并同步本表。
 
 ---
 
@@ -63,7 +71,7 @@
 
 ## 4. 单元测试明细
 
-### 4.1 `tests/unit/test_validation.py`（51 个用例）
+### 4.1 `tests/unit/test_validation.py`（52 个用例）
 
 | 测试类 | 覆盖内容 |
 |---|---|
@@ -72,7 +80,7 @@
 | `TestClassifyEnergySeries` | 空数组提示；全零提示；无光伏提示；无负荷提示；正常场景无提示 |
 | `TestProjectValidation` | 合法项目；空白名称；空名称；超长名称；边界长度 200 通过；非法项目类型；非法主键；非法时间戳；`require_valid_project` 抛错；全部 3 种项目类型合法 |
 
-### 4.2 `tests/unit/test_self_consumption.py`（41 个用例）
+### 4.2 `tests/unit/test_self_consumption.py`（42 个用例）
 
 | 测试类 | 覆盖内容 |
 |---|---|
@@ -116,7 +124,7 @@
 
 ## 5. 集成测试明细
 
-### `tests/integration/test_database.py`（51 个用例）
+### 5.1 `tests/integration/test_database.py`（51 个用例）
 
 | 测试类 | 覆盖内容 |
 |---|---|
@@ -125,6 +133,17 @@
 | `TestTransactionsAndErrors` | 数据库错误导致整体回滚；非 SQL 业务异常上抛并回滚；非法路径抛 `PersistenceError`；绕过领域校验时数据库 CHECK 约束仍拦截非法数据 |
 | `TestServiceAndPersistence` | 经服务创建后**用全新连接与新服务实例重新读取**；名称去空白；空白名称被拒；非法类型被拒；字符串类型可接受；经服务更新；经服务删除；输入校验返回问题；消纳输入校验（合法/非法）；`auto_initialize=False` 后手动初始化；异常继承关系 |
 | `TestRealDatabaseSafety` | 默认库路径在测试中被重定向；临时库不在用户数据目录内；`sqlite3.Row` 行工厂可用 |
+
+### 5.2 `tests/integration/test_database_memory_and_schema_version.py`（45 个用例）
+
+| 测试类 | 覆盖内容 |
+|---|---|
+| `TestMemoryDatabaseLifecycle` | `:memory:` 与内存 URI 两种形式的建表跨事务可见；写入后新事务可读；完整 CRUD；回滚隔离；外键强制；`schema_meta` 表存在性；实例间互相不可见；`close()` 语义与上下文管理器 |
+| `TestSchemaVersionProtection` | 当前版本幂等与数据保留；未来版本拒绝且**不改写版本号**；被拒后不改动表结构；旧版本无迁移步骤拒绝；迁移注册表为空；已登记迁移真实执行 `ALTER TABLE`；缺步骤停止升级；异常层次 |
+| `TestMissingVersionRecordIsNotTreatedAsNewDatabase` | **元数据表存在但缺版本记录**时：查询与初始化都报错；不写当前版本号；不补齐缺失表；不接纳未知结构；既有业务数据保留；NULL 版本值同样视为元数据不完整；空 `schema_meta` 表被拒绝；只有 `schema_meta` 表的半成品库被拒绝；对照组——真正空库仍可初始化、版本有效时缺表可修复 |
+| `TestFileDatabaseUnaffected` | 文件库跨实例持久；WAL 与外键；`is_memory=False`；`uri` 参数不影响文件路径；`close()` 不影响文件库 |
+
+---
 
 ---
 
@@ -207,8 +226,8 @@
 
 | 项目 | 要求 |
 |---|---|
-| 操作系统 | Windows 10/11（本项目开发与验收环境） |
-| Python | ≥ 3.11（实测 3.14.7） |
+| 操作系统 | Windows 10/11（本机开发与验收环境）；CI 另在 Ubuntu 上运行 |
+| Python | ≥ 3.11（本机 3.14.7；CI 实测 3.14.8 与 3.11.17 均全部通过） |
 | 依赖 | `python -m pip install -e ".[dev]"` |
 | Qt 平台 | 无显示器时 `QT_QPA_PLATFORM=offscreen` |
 | 数据库 | 仅使用临时文件或内存库 |

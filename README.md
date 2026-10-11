@@ -4,6 +4,9 @@
 - 当前阶段：**第一阶段：工程骨架与核心规则冻结**
 - 仓库：https://github.com/win8-cmd/pv
 - 开发分支：`main`
+- 当前状态：第一阶段已完成，**正在 PR #1 审阅中，尚未合并到 `main`**
+  （审阅分支 `fix/stage1-review-memory-db-and-schema-version`；PR:
+  https://github.com/win8-cmd/pv/pull/1 ）
 
 ---
 
@@ -32,7 +35,7 @@ CENEP 是一款面向**中国工商业分布式光伏项目**的经济评价桌�
 
 ## 2. 当前版本已实现的功能
 
-以下功能**已实现且有自动化测试覆盖**（199 个用例全部通过）：
+以下功能**已实现且有自动化测试覆盖**（244 个用例全部通过）：
 
 | 功能 | 说明 |
 |---|---|
@@ -252,10 +255,10 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\.venv\Scripts\python.exe -m pytest --cov=cenep --cov-report=term-missing
 ```
 
-**预期结果：** `199 passed`（0 失败、0 错误）。
+**预期结果：** `244 passed`（0 失败、0 错误、0 跳过）。
 
-用例分布：单元测试 148 个（校验 52、消纳计算 42、架构约束 16、包与命令行 21、界面 17），
-集成测试 51 个（SQLite 建表、CRUD、事务、约束与异常分类）。
+用例分布：单元与界面测试 148 个（校验 52、消纳计算 42、架构约束 16、包与命令行 21、界面 17），
+集成测试 96 个（SQLite 建表、CRUD、事务、约束与异常分类 51；内存库、模式版本保护与元数据完整性 45）。
 
 界面测试使用 Qt 的 `offscreen` 平台，在无显示器的环境中也能真实创建窗口：
 
@@ -313,8 +316,11 @@ pv/  (仓库根目录)
     │   ├── test_package_import.py
     │   └── test_gui_main_window.py
     └── integration/              集成测试
-        └── test_database.py
+        ├── test_database.py
+        └── test_database_memory_and_schema_version.py
 ```
+
+顶层另含 `.github/workflows/tests.yml`：推送到 `main` 或提交 Pull Request 时自动运行测试。
 
 ### 8.1 分层依赖方向
 
@@ -360,28 +366,37 @@ pv/  (仓库根目录)
 
 ## 10. 已知问题与技术限制
 
-1. **尚无数据库迁移框架。** 当前 `SCHEMA_VERSION = 1`，
-   修改表结构需要人工编写迁移步骤，不能依赖自动升级。
+1. **迁移框架仅具骨架。** 迁移注册表 `MIGRATIONS` 与阶梯执行逻辑已实现并通过测试
+   （含真实 `ALTER TABLE` 场景），但当前 `SCHEMA_VERSION = 1` 没有历史版本，
+   注册表为空。提升模式版本时必须在该表中登记真实的表结构变更，
+   **禁止只改版本号**。
 2. **仅 `project` 表具备完整 CRUD。** 其余 10 张业务表只冻结了结构，
    尚无仓储与用例实现。
-3. **第一阶段不引入 `pvlib`。** 发电量需由外部提供，光伏方案表中
+3. **内存数据库为共享缓存实现，不支持跨实例共享。** `Database(":memory:")`
+   等价于 `file:<唯一名>?mode=memory&cache=shared`，由实例持有锚定连接维持其存活；
+   实例 `close()` 后数据消失。需要持久数据请使用文件数据库。
+4. **第一阶段不引入 `pvlib`。** 发电量需由外部提供，光伏方案表中
    `annual_generation_kwh` 为可空字段。
-4. **无任何已核实的电价数据。** 电价方案表仅定义结构；
+5. **无任何已核实的电价数据。** 电价方案表仅定义结构；
    未经正式来源核实的数据不得标记为已核实。
-5. **单用户单库，无并发写保护策略。** 未做多进程并发写压力测试。
-6. **界面功能刻意保持最小。** 不追求美观，无菜单栏、无快捷键、
+6. **单用户单库，无并发写保护策略。** 未做多进程并发写压力测试，
+   内存库的多线程并发访问亦未验证。
+7. **界面功能刻意保持最小。** 不追求美观，无菜单栏、无快捷键、
    无项目搜索与分页；界面自动化验证在 Qt `offscreen` 平台完成，
    未在物理显示器上人工确认布局观感。
-7. **未提供打包与安装程序。** 仅支持源码方式安装（`pip install -e`）。
-8. **Windows 上直接调用 `python` 可能命中 Microsoft Store 存根程序。**
+8. **未提供打包与安装程序。** 仅支持源码方式安装（`pip install -e`）。
+9. **Windows 上直接调用 `python` 可能命中 Microsoft Store 存根程序。**
    请使用 `.\.venv\Scripts\python.exe` 或 `py` 启动器。
 
----
+> **CI 状态：** `.github/workflows/tests.yml` 已在 GitHub Actions 上实际运行通过，
+> Python 3.14 与 3.11 两个作业均为 `244 passed`，无跳过用例。详见
+> [docs/ACCEPTANCE_CRITERIA.md](docs/ACCEPTANCE_CRITERIA.md) 第 5.2 节。
 
 ## 11. 文档索引
 
 | 文档 | 内容 |
 |---|---|
+| [docs/PROGRESS_LOG.md](docs/PROGRESS_LOG.md) | **完成结论日志**：每轮完成后追加的结论记录（最新在最上面） |
 | [docs/PRD.md](docs/PRD.md) | 产品目标、用户角色、使用流程、功能边界与优先级 |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 分层设计、模块职责、依赖方向、数据流、错误处理、扩展方式 |
 | [docs/DATA_MODEL.md](docs/DATA_MODEL.md) | 实体、字段、类型、主键、外键、单位、约束与索引 |
@@ -390,6 +405,11 @@ pv/  (仓库根目录)
 | [docs/TEST_PLAN.md](docs/TEST_PLAN.md) | 单元、集成、边界、界面与回归测试方案 |
 | [docs/ACCEPTANCE_CRITERIA.md](docs/ACCEPTANCE_CRITERIA.md) | 第一阶段逐项验收标准与未验证事项 |
 | [docs/AI_DEVELOPMENT_GUIDE.md](docs/AI_DEVELOPMENT_GUIDE.md) | 后续开发者的改码、加模块、改模型、写测试与提交规范 |
+
+> **工作约定：** 每一轮开发或复核完成后，必须在
+> [docs/PROGRESS_LOG.md](docs/PROGRESS_LOG.md) 追加一条结论记录并同步到 GitHub，
+> 内容包括实际的测试数字、CI 结果、Git 状态与未验证事项。
+> 具体维护步骤见该文件第 3 节。
 
 ---
 
