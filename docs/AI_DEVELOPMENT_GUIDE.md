@@ -381,12 +381,37 @@ git diff --stat        # 确认改动范围与预期一致
 - [ ] 无越界依赖（第 2 节规则全部满足）。
 - [ ] 无假实现（第 8 节 B1/B2/B4 全部满足）。
 - [ ] git 状态已核查（`git status --short`、`git diff --check`、`git diff --stat`）。
+- [ ] **已在 `docs/PROGRESS_LOG.md` 追加本轮的完成结论记录，并同步到 GitHub**（见第 10.1 节）。
+
+### 10.1 每轮必做：更新完成结论日志
+
+**这是一项固定工作约定，不是可选项。** 每一轮开发或复核完成后，
+必须在 `docs/PROGRESS_LOG.md` 追加一条结论记录，并推送到 GitHub，否则本轮不算完成。
+
+操作步骤：
+
+1. 实际运行测试与校验命令，记录**真实数字**（命令、通过数、失败数、跳过数）。
+   禁止凭记忆或估算填写，也禁止把"代码已写"写成"已验证"。
+2. 取 Git 事实：`git log --oneline`、`git status --short --branch`、`git rev-parse HEAD`、
+   与远程的 `git rev-list --left-right --count origin/<branch>...HEAD`。
+3. 明确列出**仍未验证**的能力，逐条写清；不允许省略或用"基本完成"模糊表述。
+4. 在 `docs/PROGRESS_LOG.md` 的索引表格顶部插入一行，并在索引下方新增
+   `## R<n> — <任务名>` 小节，沿用既有的九个小节结构：
+   完成内容 / 缺陷或变更原因 / 关键设计决策与理由 / 测试结果（实测）/
+   CI 实测 / 变更文件清单 / Git 状态 / 未完成事项 / 下一轮建议。
+5. 若用例数量、版本号或验收日期发生变化，同步更新 `README.md`、
+   `docs/TEST_PLAN.md`、`docs/ACCEPTANCE_CRITERIA.md`，
+   避免各文件互相矛盾（文档与代码不一致视为未通过）。
+6. 提交并推送，然后在记录中**如实写明**是"已推送到远程"还是"仅本地提交"。
+
+轮次编号连续递增（`R1`、`R2`……）。同一轮内的多次补充提交不新开轮次，
+直接补充该轮记录即可。
 
 对应命令：
 
 ```powershell
-# 1) 全量测试（唯一权威的"通过"依据）
-.venv\Scripts\python.exe -m pytest -q
+# 1) 全量测试（唯一权威的"通过"依据，会输出 N passed 汇总行）
+.venv\Scripts\python.exe -m pytest -p no:cacheprovider
 
 # 2) 仅分层架构约束（改动 import 结构或界面时必须单独确认）
 .venv\Scripts\python.exe -m pytest tests\unit\test_layering.py -q
@@ -394,10 +419,14 @@ git diff --stat        # 确认改动范围与预期一致
 # 3) 仅数据库与持久化
 .venv\Scripts\python.exe -m pytest tests\integration -q
 
-# 4) git 状态核查
+# 4) 用例数量（写入结论记录时使用真实收集结果）
+.venv\Scripts\python.exe -m pytest --collect-only -q
+
+# 5) git 状态核查
 git status --short
 git diff --check
 git diff --stat
+git rev-list --left-right --count origin/<branch>...HEAD
 ```
 
 ---

@@ -393,6 +393,7 @@ pv/  (仓库根目录)
 
 | 文档 | 内容 |
 |---|---|
+| [docs/PROGRESS_LOG.md](docs/PROGRESS_LOG.md) | **完成结论日志**：每轮完成后追加的结论记录（最新在最上面） |
 | [docs/PRD.md](docs/PRD.md) | 产品目标、用户角色、使用流程、功能边界与优先级 |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 分层设计、模块职责、依赖方向、数据流、错误处理、扩展方式 |
 | [docs/DATA_MODEL.md](docs/DATA_MODEL.md) | 实体、字段、类型、主键、外键、单位、约束与索引 |
@@ -401,6 +402,11 @@ pv/  (仓库根目录)
 | [docs/TEST_PLAN.md](docs/TEST_PLAN.md) | 单元、集成、边界、界面与回归测试方案 |
 | [docs/ACCEPTANCE_CRITERIA.md](docs/ACCEPTANCE_CRITERIA.md) | 第一阶段逐项验收标准与未验证事项 |
 | [docs/AI_DEVELOPMENT_GUIDE.md](docs/AI_DEVELOPMENT_GUIDE.md) | 后续开发者的改码、加模块、改模型、写测试与提交规范 |
+
+> **工作约定：** 每一轮开发或复核完成后，必须在
+> [docs/PROGRESS_LOG.md](docs/PROGRESS_LOG.md) 追加一条结论记录并同步到 GitHub，
+> 内容包括实际的测试数字、CI 结果、Git 状态与未验证事项。
+> 具体维护步骤见该文件第 3 节。
 
 ---
 
