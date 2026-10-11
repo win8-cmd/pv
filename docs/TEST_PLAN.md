@@ -1,9 +1,10 @@
 # CENEP 测试计划（TEST PLAN）
 
-- 文档版本：`2026.02-stage1`
+- 文档版本：`2026.10-stage1-r2`
 - 软件版本：`0.1.0`
 - 对应测试目录：`tests/`
-- 当前基线：**199 个用例，全部通过**（实测结果见 `docs/ACCEPTANCE_CRITERIA.md`）
+- 当前基线：**234 个用例，全部通过**（实测结果见 `docs/ACCEPTANCE_CRITERIA.md`）
+- 最近一次实测：2026-10-11，Python 3.14.7，Windows 11，`234 passed`
 
 按文件分布（实测 `pytest --collect-only -q` 输出）：
 
@@ -15,7 +16,14 @@
 | `tests/unit/test_package_import.py` | 21 | 单元 / 应用验证 |
 | `tests/unit/test_gui_main_window.py` | 17 | 界面（标记 `gui`） |
 | `tests/integration/test_database.py` | 51 | 集成 |
-| **合计** | **199** | |
+| `tests/integration/test_database_memory_and_schema_version.py` | 35 | 集成（内存库与模式版本保护） |
+| **合计** | **234** | |
+
+小计：单元与界面测试 148 个，集成测试 86 个。
+
+> 用例数量随缺陷修复与功能增加而变化。判断质量的标准是
+> **`0 failed`、`0 error`、`0 skipped`**，而不是数量本身。
+> 每次修改后必须重新运行并同步本表。
 
 ---
 

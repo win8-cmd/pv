@@ -97,7 +97,7 @@ total = sum(min(l, p) for l, p in zip(load, pv))
    .venv\Scripts\python.exe -m pytest -q
    ```
 
-   基线期望：`199 passed`（2026 年第一阶段现状；数量会随新增测试增长，关键是 `0 failed`）。
+   基线期望：`234 passed`（2026 年第一阶段现状；数量会随新增测试增长，关键是 `0 failed`）。
 
 3. **小步修改**：一次只改一个关注点。不顺手重构无关代码，不格式化整个文件，不修改不属于本次任务的测试。
 4. **同步文档**：口径变化同步 `docs/CALCULATION_SPEC.md`；数据模型变化同步 `docs/DATA_MODEL.md`；架构或流程规则变化同步本文档（必要时同步 `docs/ARCHITECTURE.md`）。
@@ -167,25 +167,33 @@ total = sum(min(l, p) for l, p in zip(load, pv))
 
 1. **修改 `src/cenep/domain/models.py`**：新增/修改实体字段、枚举值与默认值。枚举取值必须与数据库 `CHECK` 约束一致。
 2. **修改 `src/cenep/infrastructure/database.py` 中的 `SCHEMA_STATEMENTS`**：同步建表语句、`CHECK` 约束、外键与索引；如新增业务表，同步更新 `BUSINESS_TABLES`（`tests/integration/test_database.py::TestSchemaInitialization::test_initialize_creates_all_tables` 会逐表核对）。
-3. **提升 `SCHEMA_VERSION`**（当前值为 `1`）。该值由 `Database.initialize_schema()` 以 `INSERT ... ON CONFLICT(key) DO UPDATE` 写入 `schema_meta` 表。
-4. **编写数据迁移方案**。必须正视现实：**当前项目没有迁移框架**。`Database.initialize_schema()` 只执行 `CREATE TABLE IF NOT EXISTS` 与索引语句，再把 `schema_version` 更新为新值——它能建新表，但**不会**为已存在的表增加列、不会转换既有数据、不会回滚。
-   - 因此，凡涉及既有表结构变化（加列、改约束、改类型），必须显式编写迁移代码，参考落地方式：
+3. **提升 `SCHEMA_VERSION`**（当前值为 `1`）。该值由 `Database.initialize_schema()` 写入 `schema_meta` 表。
+4. **在迁移注册表 `MIGRATIONS` 中登记真实的表结构变更**（`src/cenep/infrastructure/database.py`）。
+   现状：`MIGRATIONS: dict[int, tuple[str, ...]] = {}` 已就位，键为**升级前**版本号，
+   值为把该版本升级到 `键 + 1` 的 SQL 序列；`Database._apply_migrations()` 会按阶梯
+   逐步执行，并在每一步之后更新 `schema_meta`。
+   - 提升 `SCHEMA_VERSION` 到 `2` 时，必须登记从 `1` 到 `2` 的**真实**结构变更，例如：
 
      ```python
-     # 建议新增：src/cenep/infrastructure/migrations.py（示例形态，非现有文件）
-     # 1) 读取当前版本：版本取自 schema_meta 的 schema_version；
-     #    若表不存在则为 None（见 Database.schema_version 的实现）。
-     # 2) 逐个应用 (from_version -> to_version) 的迁移函数，全部在 Database.transaction() 内执行，
-     #    与 schema_version 的更新同一事务，保证"迁移成功"与"版本号前进"原子一致。
-     # 3) 只允许幂等、可重入的语句（PRAGMA table_info 先探测列是否已存在，再决定是否 ALTER TABLE）。
-     # 4) 加列必须允许 NULL 或提供默认值，不得要求已有行立即满足新的非空约束。
-     # 5) 禁止 DROP TABLE / DROP COLUMN 式重建；确需重建时，必须走
-     #    "新建临时表 → 复制数据 → 校验行数与内容 → 原子替换 → 保留备份文件"的完整路径并在文档中说明。
-     # 6) 无法安全迁移时必须抛明确异常并中止启动，而不是继续用不匹配的结构运行。
+     MIGRATIONS = {
+         1: (
+             "ALTER TABLE project ADD COLUMN grid_connection_date TEXT",
+         ),
+     }
      ```
 
-   - 应用 `SCHEMA_VERSION` 提升前，`initialize_schema()` 的幂等性会掩盖问题：旧库不会因为版本号变化而报错，只会静默缺少新列。因此**版本号提升必须与迁移代码同一次提交落地**。
-5. **更新 `docs/DATA_MODEL.md`**。该文件已存在（文档版本 `2026.02-stage1`，声明与 `SCHEMA_STATEMENTS` 逐字段一致），是数据模型的权威说明；字段、类型、约束或索引的任何改动都必须同时修改 `src/cenep/domain/models.py`、`src/cenep/infrastructure/database.py` 与本文件。文档目录现状：`docs/CALCULATION_SPEC.md`、`docs/DATA_MODEL.md`、`docs/ARCHITECTURE.md`、`docs/PRD.md`、`docs/ROADMAP.md`、`docs/AI_DEVELOPMENT_GUIDE.md`。**不要在未读这些文件的情况下改动它们**；若发现文档与代码不一致，以代码为准并先修正文档，再继续改代码。
+   - 未登记迁移步骤时，打开旧版本数据库会抛 `SchemaVersionError` 并**拒绝启动**，
+     不会出现"仅改版本号、结构却没变"的假升级。
+   - 迁移语句要求：幂等可重入（先 `PRAGMA table_info` 探测再决定是否 `ALTER TABLE`）；
+     加列必须允许 `NULL` 或提供默认值，不得要求已有行立即满足新的非空约束；
+     禁止 `DROP TABLE` / `DROP COLUMN` 式重建；确需重建时走
+     "新建临时表 → 复制数据 → 校验行数与内容 → 原子替换 → 保留备份"的完整路径并在文档中说明。
+   - 迁移机制本身已由测试覆盖：
+     `tests/integration/test_database_memory_and_schema_version.py::TestSchemaVersionProtection::test_registered_migration_upgrades_real_structure`
+     验证迁移真的执行 `ALTER TABLE`（而非只改版本号），
+     `::test_missing_migration_step_stops_upgrade` 验证缺步骤时停止升级。
+   - **版本号提升必须与迁移代码在同一次提交中落地。**
+5. **更新 `docs/DATA_MODEL.md`**。该文件是数据模型的权威说明（声明与 `SCHEMA_STATEMENTS` 逐字段一致）；字段、类型、约束或索引的任何改动都必须同时修改 `src/cenep/domain/models.py`、`src/cenep/infrastructure/database.py` 与本文件。**不要在未读这些文件的情况下改动它们**；若发现文档与代码不一致，以代码为准并先修正文档，再继续改代码。
 6. **增加集成测试**（放在 `tests/integration/`）：至少覆盖新表的建表、字段往返（写入后重新用新连接读取）、约束拒绝非法值、外键行为、以及迁移路径（对旧版本库执行迁移后结构与数据均正确）。
 
 **硬性红线**：已存在的用户数据库（默认位于 `%LOCALAPPDATA%\CENEP\cenep.db`）**不能被破坏性重建**。禁止任何形式的"删除数据库文件后重建"、"DROP TABLE 后重建"、"清空表再导入"作为升级手段。用户数据丢失不可逆，任何方案都必须先保留备份并可在失败时回退。
@@ -212,12 +220,13 @@ total = sum(min(l, p) for l, p in zip(load, pv))
 
 | 目录 | 范围 | 允许依赖 |
 |---|---|---|
-| `tests/unit/` | 领域模型、校验规则、计算函数、分层约束、界面构造与交互（无显示器） | 不得依赖真实文件系统持久化状态；数据库用 `:memory:` 或 `tmp_path` |
-| `tests/integration/` | 数据库建表与版本、仓储 CRUD、事务与回滚、约束与异常翻译、应用服务与落库 | 使用 `tmp_path` 下的真实 SQLite 文件 |
+| `tests/unit/` | 领域模型、校验规则、计算函数、分层约束、界面构造与交互（无显示器） | 不得依赖真实文件系统持久化状态；数据库用 `Database(":memory:")` 或 `tmp_path` |
+| `tests/integration/` | 数据库建表与版本、仓储 CRUD、事务与回滚、约束与异常翻译、内存库生命周期、模式版本保护、应用服务与落库 | 使用 `tmp_path` 下的真实 SQLite 文件，或共享缓存内存库 |
 
 ### 7.2 硬性规则
 
 1. **测试必须使用临时数据库（`tmp_path`）**，严禁触碰 `%LOCALAPPDATA%\CENEP\cenep.db`。使用 `tests/conftest.py` 提供的夹具：`db_path`（`tmp_path / "test_cenep.db"`）、`database`（已建表）、`memory_database`、`repository`、`sample_project`、`project_service`。
+   使用内存库时注意：`Database(":memory:")` 已被实现为**共享缓存内存库**并由实例持有锚定连接，可以跨事务读写；但它**不能跨 `Database` 实例共享**，用完请调用 `close()` 或使用 `with` 语句。不要绕开 `Database` 直接用 `sqlite3.connect(":memory:")` 建表后交给仓储，那会重现"表随连接消失"的问题。
 2. **`tests/conftest.py` 的 `_isolate_default_database` 是 `autouse` 自动夹具**：它对每个测试把环境变量 `CENEP_DB_PATH` 重定向到 `tmp_path_factory.mktemp("cenep-default-db")` 下的临时库。因此即使被测代码走了默认路径分支（如 `ProjectService()` 不传 `database`），也不会碰到真实库。该行为由 `tests/integration/test_database.py::TestRealDatabaseSafety::test_default_database_path_is_redirected_in_tests` 与 `test_temp_database_is_not_inside_user_data_dir` 显式断言。**不要删除、不要覆盖、不要绕过这个夹具。**
 3. **断言必须校验数值与能量守恒**：使用 `pytest.approx` 而不是 `==` 比较浮点；对消纳类计算必须断言两条守恒关系（`total_pv == 自用 + 上网`、`total_load == 自用 + 购电`），并调用 `result.check_energy_balance()`。参考 `tests/unit/test_self_consumption.py::test_energy_conservation_relations`。
 4. **非法输入必须断言两件事**：明确报错（异常类型 + `issue_code`），且**原始数据未被修改**。参考 `tests/unit/test_self_consumption.py::TestInvalidInputRaises::test_invalid_input_is_not_silently_corrected` 与 `tests/unit/test_validation.py::TestRequireValidEnergySeries::test_input_data_is_not_modified`；落库场景还需断言库内行数/内容未变（如 `tests/integration/test_database.py::TestProjectCrud::test_update_with_invalid_name_rejected`）。
@@ -445,6 +454,6 @@ AI 开发者向用户或上游智能体汇报时，必须遵守：
 2. **不得编造测试结果**。不得写"测试已全部通过"而实际未运行。
 3. **未验证事项必须显式标注**：写明未验证的内容、原因（如无显示器环境、缺依赖）、以及验证所需的具体命令。
 4. **区分"已实现 / 未实现 / 部分实现"**，并说明各自的边界。不要用"基本完成""应该没问题"这类模糊表述代替事实。
-5. **报告必须包含证据**：运行的命令、观测到的结果（如 `199 passed in 4.94s`）、改动的文件清单、以及 git 状态核查结论（本地提交还是已推送）。
+5. **报告必须包含证据**：运行的命令、观测到的结果（如 `234 passed`）、改动的文件清单、以及 git 状态核查结论（本地提交还是已推送）。
 6. **测试通过数量与耗时以实际输出为准**，不要凭记忆填写。
 7. **遇到阻塞要直说**：明确指出是哪一条规则或哪一个测试挡住了进展，不要绕过规则实现"看起来能跑"的版本。

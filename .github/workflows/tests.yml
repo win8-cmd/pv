@@ -1,0 +1,95 @@
+name: tests
+
+# 触发条件：推送到 main、对 main 发起 Pull Request、以及手动触发。
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 最小权限：仅需读取仓库内容。
+permissions:
+  contents: read
+
+# 同一分支的重复触发取消前一次运行，避免排队浪费。
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 无显示环境下运行 Qt 测试（PySide6 使用 offscreen 平台插件）
+  QT_QPA_PLATFORM: offscreen
+  # 统一使用 UTF-8，避免中文日志/断言消息在 CI 上乱码
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+  # 关闭 pip 的版本检查提示噪音
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 主测试任务：使用本项目实际开发与验收所用的 Python 版本。
+  # 该任务失败即整个工作流失败。
+  # ---------------------------------------------------------------------------
+  test:
+    name: pytest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.14 为实测通过版本；3.11 为 pyproject 声明的下限，用于兼容性观察。
+        python-version: ["3.14", "3.11"]
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: 安装 Qt 运行所需的系统库
+        # PySide6 的 offscreen 平台在最小化 Ubuntu 镜像上需要这些共享库
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libxkbcommon-x11-0 libdbus-1-3 libfontconfig1
+
+      - name: 显示 Python 与 pip 版本
+        run: |
+          python --version
+          python -m pip --version
+
+      - name: 安装项目及开发依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: 显示实际安装的关键依赖版本
+        run: |
+          python -c "import PySide6, pandas, openpyxl, pytest; print('PySide6', PySide6.__version__); print('pandas', pandas.__version__); print('openpyxl', openpyxl.__version__); print('pytest', pytest.__version__)"
+
+      - name: 检查测试收集情况（不允许收集错误）
+        run: python -m pytest --collect-only -q
+
+      - name: 运行完整测试套件
+        # pytest 在有失败或错误时返回非零退出码，因此测试失败必然导致工作流失败。
+        # 输出中会给出 passed/failed/skipped 的实际数量。
+        run: python -m pytest -q -p no:cacheprovider
+
+      - name: 架构分层检查（防止越界依赖）
+        # 该测试是核心架构守卫，单独跑一次以便日志中快速定位。
+        run: python -m pytest -q tests/unit/test_layering.py
+
+      - name: 检查 git 工作树未被测试污染
+        # 测试必须使用临时数据库，不得在仓库内留下 .db 等产物。
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::测试运行后工作树出现未预期变更（可能写入了仓库内的数据库或缓存）："
+            git status --porcelain
+            exit 1
+          fi
+          echo "工作树干净：测试未污染仓库"

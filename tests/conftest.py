@@ -46,10 +46,17 @@ def database(db_path: Path) -> Iterator[Database]:
 
 @pytest.fixture
 def memory_database() -> Iterator[Database]:
-    """内存数据库（同样已建表）。"""
+    """内存数据库（同样已建表）。
+
+    ``Database(":memory:")`` 已实现为**共享缓存**内存库，由实例持有锚定连接
+    维持其存活，因此可以跨事务读写（回归测试见
+    ``tests/integration/test_database_memory_and_schema_version.py``）。
+    注意：内存库不能跨 ``Database`` 实例共享，且实例 ``close()`` 后数据消失。
+    """
     db = Database(":memory:")
     db.initialize_schema()
     yield db
+    db.close()
 
 
 @pytest.fixture

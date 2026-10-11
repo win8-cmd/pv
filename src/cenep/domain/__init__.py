@@ -11,6 +11,7 @@ from cenep.domain.exceptions import (
     EntityAlreadyExistsError,
     EntityNotFoundError,
     PersistenceError,
+    SchemaVersionError,
     UnsupportedOperationError,
     ValidationError,
 )
@@ -81,6 +82,7 @@ __all__ = [
     "ReportType",
     "ResultRecord",
     "Scenario",
+    "SchemaVersionError",
     "Severity",
     "SourceType",
     "TariffModel",

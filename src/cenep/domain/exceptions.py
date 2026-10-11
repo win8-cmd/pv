@@ -104,6 +104,28 @@ class PersistenceError(CENEPError):
         self.operation = operation
 
 
+class SchemaVersionError(PersistenceError):
+    """数据库模式版本与本程序不兼容。
+
+    典型场景：数据库由**更新版本**的 CENEP 创建，当前程序无法安全读写它。
+    此时必须拒绝初始化，而不是把版本号改写成旧值——后者会造成静默降级，
+    使新版本写入的数据被旧程序误读甚至破坏。
+    """
+
+    code = "schema_version_incompatible"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        found_version: int | None = None,
+        supported_version: int | None = None,
+    ) -> None:
+        super().__init__(message, operation="initialize_schema")
+        self.found_version = found_version
+        self.supported_version = supported_version
+
+
 class UnsupportedOperationError(CENEPError):
     """调用了本阶段尚未实现的能力。
 

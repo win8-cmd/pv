@@ -167,9 +167,38 @@ calculate_self_consumption_with_issues(load, pv, *, interval_minutes=None) \
 | `SCHEMA_STATEMENTS` | 全部建表与建索引语句（幂等，`CREATE TABLE IF NOT EXISTS`） |
 | `BUSINESS_TABLES` | 11 张业务表名，供测试核对 |
 | `SCHEMA_VERSION` | 模式版本号，写入 `schema_meta` |
-| `Database` | 连接、事务、模式初始化、表名与版本查询、`exists()` |
+| `MIGRATIONS` | 模式迁移注册表 `{起始版本: (SQL, ...)}`，当前为空（`SCHEMA_VERSION = 1`） |
+| `Database` | 连接、事务、模式初始化、模式版本校验与迁移、表名与版本查询、`exists()`、`close()` |
 | `ProjectRepository` | `project` 表的完整 CRUD |
 | `translate_integrity_error()` | 把驱动层 `IntegrityError` 分类为领域异常 |
+
+#### 数据库连接模式
+
+| 模式 | 用法 | 数据存活范围 |
+|---|---|---|
+| 文件数据库 | `Database(r"D:\data\cenep.db")` | 磁盘文件，跨进程、跨实例持久 |
+| 内存数据库 | `Database("file:x?mode=memory&cache=shared", uri=True)`，或别名 `Database(":memory:")` | 由 `Database` 实例持有的**锚定连接**维持；`close()` 后消失 |
+
+内存库必须使用**共享缓存**：SQLite 的普通内存库按连接隔离，而
+`Database.transaction()` 每次新建并在结束时关闭连接，因此普通内存库会出现
+"初始化建表后表消失、下一个事务报 `no such table`"。
+故内存模式下本类持有一个常驻锚定连接，并为每个 `Database` 实例生成唯一库名，
+保证不同实例之间互不可见。
+
+#### 模式版本保护
+
+`initialize_schema()` 先读取数据库中的模式版本，再决定动作：
+
+| 数据库中的版本 | 行为 |
+|---|---|
+| 无 `schema_meta` 表（空库） | 建表并写入 `SCHEMA_VERSION` |
+| 等于 `SCHEMA_VERSION` | 幂等执行 `CREATE ... IF NOT EXISTS`，不改变版本号 |
+| 高于 `SCHEMA_VERSION` | 抛 `SchemaVersionError`，**保持原版本号不变**，拒绝读写 |
+| 低于 `SCHEMA_VERSION` 且有迁移步骤 | 按版本阶梯执行迁移 SQL，每步之后更新版本号 |
+| 低于 `SCHEMA_VERSION` 且无迁移步骤 | 抛 `SchemaVersionError`，拒绝自动升级 |
+
+设计目的：**绝不静默降级由更新版本程序创建的数据库**，
+也绝不做"只改版本号而不迁移真实表结构"的假升级。
 
 `Database.transaction()` 语义：
 
@@ -287,6 +316,7 @@ CENEPError
 ├── EntityNotFoundError          按主键查询不到
 ├── EntityAlreadyExistsError     主键重复
 ├── PersistenceError             连接/事务/SQL 失败、外键 RESTRICT 拒绝
+│   └── SchemaVersionError       数据库模式版本与本程序不兼容（拒绝静默降级）
 └── UnsupportedOperationError    调用了尚未实现的能力
 ```
 
@@ -356,9 +386,14 @@ CENEPError
 
 ## 8. 架构层面的已知限制
 
-1. **无迁移框架。** 当前仅 `SCHEMA_VERSION = 1`，改表需要人工编写迁移步骤。
-2. **单用户单库。** 无并发写保护策略，仅依赖 SQLite 的事务与 WAL。
-3. **仓储覆盖不全。** 仅 `Project` 有仓储；其余实体的读写将在后续阶段按需实现。
-4. **无日志与可观测性配置。** `config.log_level()` 已提供读取入口，但尚未接入日志系统。
-5. **无依赖注入容器。** 依赖通过构造函数传入，界面层在装配处创建服务，
+1. **迁移框架只有骨架。** 迁移注册表 `MIGRATIONS` 与阶梯执行逻辑已实现并有测试覆盖
+   （含真实 `ALTER TABLE` 与"缺步骤即停止"场景），但当前 `SCHEMA_VERSION = 1`
+   没有历史版本，注册表为空。提升版本号时必须登记真实结构变更。
+2. **单用户单库。** 无并发写保护策略，仅依赖 SQLite 的事务与 WAL；
+   内存库由单实例持有锚定连接，未验证多线程并发访问。
+3. **内存库不能跨实例共享。** 内存库唯一名由 `Database` 实例生成，
+   实例销毁或 `close()` 后数据即消失；需要持久化请使用文件数据库。
+4. **仓储覆盖不全。** 仅 `Project` 有仓储；其余实体的读写将在后续阶段按需实现。
+5. **无日志与可观测性配置。** `config.log_level()` 已提供读取入口，但尚未接入日志系统。
+6. **无依赖注入容器。** 依赖通过构造函数传入，界面层在装配处创建服务，
    在当前规模下够用；若对象图继续增长，需要引入显式容器。
