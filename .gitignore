@@ -1,0 +1,88 @@
+# ===== 虚拟环境 =====
+.venv/
+venv/
+env/
+ENV/
+
+# ===== Python 字节码与缓存 =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# ===== 构建产物 =====
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+wheels/
+pip-wheel-metadata/
+
+# ===== 测试与覆盖率缓存 =====
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+
+# ===== 类型检查 / 静态检查缓存 =====
+.mypy_cache/
+.dmypy.json
+.ruff_cache/
+
+# ===== 本地数据库（真实项目数据，不得提交） =====
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+!tests/**/fixtures/*.db
+
+# ===== 电费账单原始文件与导入产物（含客户敏感信息） =====
+*.pdf
+*.PDF
+data/bills/
+data/imports/
+data/exports/
+*.xls
+*.xlsx
+!docs/**/*.xlsx
+
+# ===== 日志与临时文件 =====
+*.log
+logs/
+*.tmp
+*.temp
+*.bak
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== 沙箱/工具恢复记录（本地临时产物） =====
+.acl-recovery/
+
+# ===== 个人环境配置 =====
+.env
+.env.*
+!.env.example
+*.local.toml
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ===== 密钥与敏感凭据 =====
+*.pem
+*.key
+*.p12
+*.pfx
+secrets.toml
+credentials.json
+service-account*.json

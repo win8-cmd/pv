@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cenep"
+version = "0.1.0"
+description = "CENEP - 中国工商业分布式光伏项目经济评价软件"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "CENEP Project" }]
+keywords = ["photovoltaic", "pv", "china", "techno-economic", "self-consumption"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Engineering",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+]
+
+# 第一阶段运行依赖：只列出当前真正被代码使用的库。
+# pandas / openpyxl 已列入依赖，因为它们是第二阶段账单导入与报表导出的既定基础，
+# 且本阶段的包导入自检（tests/unit/test_package_import.py）会验证其可用性。
+dependencies = [
+    "PySide6>=6.6",
+    "pandas>=2.0",
+    "openpyxl>=3.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+]
+
+[project.gui-scripts]
+cenep-gui = "cenep.ui.main_window:main"
+
+[project.scripts]
+cenep = "cenep.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+cenep = ["py.typed"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+markers = [
+    "gui: 需要真实启动 Qt 事件循环的测试（无图形环境时可能被跳过）",
+]
