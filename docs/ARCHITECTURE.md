@@ -225,6 +225,56 @@ calculate_self_consumption_with_issues(load, pv, *, interval_minutes=None) \
 - 其他异常 → 回滚后原样上抛（业务异常不被吞掉）；
 - 每次连接都执行 `PRAGMA foreign_keys = ON`，文件库额外启用 WAL。
 
+### 3.6.1 `cenep/domain/pdf_extraction.py` 与 `cenep/infrastructure/pdf/`
+
+第二阶段 P0-1 引入的 PDF 文本提取，刻意拆成两层：
+
+| 模块 | 层 | 依赖 | 职责 |
+|---|---|---|---|
+| `domain/pdf_extraction.py` | 领域层 | **纯 Python**（无 pypdf/Qt/sqlite3） | `PdfExtractionStatus`、`PdfPage`、`PdfExtractionResult`、文本规范化 |
+| `infrastructure/pdf/extractor.py` | 基础设施层 | `pypdf` | 打开 PDF、逐页提取、SHA-256、文本层判定、异常映射 |
+
+**为什么这样拆**：解析库是"实现细节"，而"一页文本、一次提取的状态"是领域语言。
+界面与业务只依赖领域模型，未来把 `pypdf` 换成 `pdfplumber` 不需要改动上层。
+
+约束（由 `tests/unit/test_layering.py` 强制）：
+
+- PDF 解析库**只允许**出现在 `infrastructure`；
+  `domain`、`calculations`、`application`、`ui` 一律禁止导入。
+- `domain/pdf_extraction.py` 不得导入 `pypdf`、`sqlite3`、`PySide6`。
+
+状态语义（**四个状态必须互不混淆**）：
+
+| 状态 | 场景 | 文本处理要求 | `text_layer_available` | `is_complete` |
+|---|---|---|---|---|
+| `success` | 全部页面提取成功且文本可用 | 保留全部页面文本 | `True` | `True` |
+| `partial` | **部分页面提取失败，但其他页面有可用文本** | 保留成功页面文本 + 失败页错误信息 | `True` | `False` |
+| `needs_ocr` | 整份文档没有获得可用文本 | 明确说明无法直接取得可用文本 | `False` | `False` |
+| `failed` | 文件缺失/为空/非 PDF/损坏 | 不产生页面，只保留错误 | `False` | `False` |
+| `duplicate` | 内容哈希与已登记文件相同 | 需数据库参与，**由应用服务层判定，提取器不产生** | — | — |
+
+> **为什么必须区分 `partial` 与 `needs_ocr`**：二者曾共用 `needs_ocr`，导致
+> 「部分页面读取失败（数据不完整但可用）」与「整份扫描件没有文本层（根本没有文本）」
+> 无法区分。前者应进入人工复核或重新提取并保留已取到的文本，
+> 后者需要完全不同的后续处理（OCR）。混为一谈会误导账单导入流程。
+
+**两个维度必须分开看**：
+
+- `text_layer_available` 表示「**文档里有没有可用文本**」，
+  **不表示**「所有页面都提取成功」。`partial` 时它可以为 `True`。
+- `is_complete`（等价于 `status == success`）表示「**提取结果是否完整**」。
+  账单导入必须用它判断能否当作完整账单，**不得**用 `text_layer_available` 代替。
+
+`needs_ocr` 的两种子情形由 `error_code` 区分：
+`no_text_layer`（页面本身没有文本，疑似扫描件）与
+`page_extraction_failed`（所有页面提取均失败）。
+
+领域模型在类型层面拒绝自相矛盾的组合：`success` 带错误、
+`partial` 无文本层、`partial` 无错误、`failed` 却含页面。
+
+工程约定：不使用临时文件（因此无清理问题）；原始 PDF 只读；
+失败通过结果对象表达，只有"参数非法"这类编程错误才抛 `PdfExtractionError`。
+
 ### 3.7 `cenep/ui/main_window.py`
 
 | 类/函数 | 职责 |

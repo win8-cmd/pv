@@ -21,13 +21,17 @@ classifiers = [
     "Topic :: Scientific/Engineering",
 ]
 
-# 第一阶段运行依赖：只列出当前真正被代码使用的库。
-# pandas / openpyxl 已列入依赖，因为它们是第二阶段账单导入与报表导出的既定基础，
-# 且本阶段的包导入自检（tests/unit/test_package_import.py）会验证其可用性。
+# 运行依赖：只列出当前真正被代码使用的库。
+# - PySide6：桌面界面
+# - pandas / openpyxl：账单表格处理与报表导出基础
+# - pypdf：第二阶段 P0-1 的 PDF 页级文本提取。纯 Python、无 C 扩展、
+#   支持 Python 3.11–3.14。**仅允许在 cenep.infrastructure 中使用**，
+#   领域层与计算层禁止依赖（由 tests/unit/test_layering.py 强制）。
 dependencies = [
     "PySide6>=6.6",
     "pandas>=2.0",
     "openpyxl>=3.1",
+    "pypdf>=5.0",
 ]
 
 [project.optional-dependencies]
