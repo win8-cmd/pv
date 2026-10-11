@@ -73,12 +73,43 @@ jobs:
           python -c "import PySide6, pandas, openpyxl, pytest; print('PySide6', PySide6.__version__); print('pandas', pandas.__version__); print('openpyxl', openpyxl.__version__); print('pytest', pytest.__version__)"
 
       - name: 检查测试收集情况（不允许收集错误）
+        # 只收集、不执行，快速暴露导入错误与用例数量。
         run: python -m pytest --collect-only -q
 
       - name: 运行完整测试套件
-        # pytest 在有失败或错误时返回非零退出码，因此测试失败必然导致工作流失败。
-        # 输出中会给出 passed/failed/skipped 的实际数量。
-        run: python -m pytest -q -p no:cacheprovider
+        # 不加 -q：默认详细度会输出 "N passed in Xs" 汇总行，便于在日志中直接核对
+        # passed / failed / skipped 数量。pytest 有失败或错误时返回非零退出码，
+        # 因此测试失败必然导致工作流失败。
+        # 日志写到 $RUNNER_TEMP（工作树之外），否则会污染随后的工作树洁净检查；
+        # 退出码写入文件，供下一步跳过校验复用，避免重复执行测试。
+        run: |
+          set -o pipefail
+          python -m pytest -p no:cacheprovider 2>&1 | tee "$RUNNER_TEMP/pytest-output.txt"
+          echo "PYTEST_EXIT=${PIPESTATUS[0]}" >> "$GITHUB_ENV"
+
+      - name: 校验没有测试被跳过
+        # 本阶段全部用例都应真实执行。若出现 skip，说明存在未验证能力，
+        # 必须显式暴露而不是当作通过。
+        run: |
+          python - <<'PY'
+          import os, re, sys
+          from pathlib import Path
+
+          log = Path(os.environ["RUNNER_TEMP"]) / "pytest-output.txt"
+          output = log.read_text(encoding="utf-8", errors="replace")
+          exit_code = int(os.environ.get("PYTEST_EXIT", "1"))
+          if exit_code != 0:
+              print(f"::error::测试套件失败，退出码 {exit_code}")
+              sys.exit(exit_code)
+
+          match = re.search(r"(\d+)\s+skipped", output)
+          skipped = int(match.group(1)) if match else 0
+          if skipped:
+              print(f"::error::有 {skipped} 个测试被跳过，本阶段不允许跳过用例")
+              sys.exit(1)
+          passed = re.search(r"(\d+)\s+passed", output)
+          print(f"无跳过用例，全部用例已真实执行（passed={passed.group(1) if passed else '未知'}）")
+          PY
 
       - name: 架构分层检查（防止越界依赖）
         # 该测试是核心架构守卫，单独跑一次以便日志中快速定位。
