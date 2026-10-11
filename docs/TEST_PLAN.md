@@ -3,8 +3,8 @@
 - 文档版本：`2026.10-phase2-p0-1`
 - 软件版本：`0.1.0`
 - 对应测试目录：`tests/`
-- 当前基线：**302 个用例，全部通过**（实测结果见 `docs/ACCEPTANCE_CRITERIA.md`）
-- 最近一次实测：2026-10-11，Python 3.14.7，Windows 11，`302 passed`
+- 当前基线：**321 个用例，全部通过**（实测结果见 `docs/ACCEPTANCE_CRITERIA.md`）
+- 最近一次实测：2026-10-11，Python 3.14.7，Windows 11，`321 passed`
 
 按文件分布（实测 `pytest --collect-only -q` 输出）：
 
@@ -15,12 +15,12 @@
 | `tests/unit/test_gui_main_window.py` | 17 | 界面（标记 gui） |
 | `tests/unit/test_layering.py` | 18 | 单元（架构约束） |
 | `tests/unit/test_package_import.py` | 21 | 单元 / 应用验证 |
-| `tests/unit/test_pdf_extraction.py` | 56 | 单元（P0-1 PDF 提取） |
+| `tests/unit/test_pdf_extraction.py` | 75 | 单元（P0-1 PDF 提取与状态语义） |
 | `tests/unit/test_self_consumption.py` | 42 | 单元 |
 | `tests/unit/test_validation.py` | 52 | 单元 |
-| **合计** | **302** | |
+| **合计** | **321** | |
 
-小计：单元与界面测试 206 个，集成测试 96 个。
+小计：单元与界面测试 225 个，集成测试 96 个。
 
 > 用例数量随缺陷修复与功能增加而变化。判断质量的标准是
 > **`0 failed`、`0 error`、`0 skipped`**，而不是数量本身。
@@ -121,7 +121,7 @@
 | `TestCalculationFromGui` | 界面计算结果含 9/2/4/13/11 kWh 与 0.818182、0.692308、0.181818；空输入的"未定义"提示；`_parse_series` 拒绝非法 token；接受中文逗号与顿号；**负数原样传递不修正** |
 | `TestInvalidInputHandling` | 长度不一致时给出明确提示且界面不崩溃；非法时间粒度被拒绝且不产生计算结果 |
 
-### 4.6 `tests/unit/test_pdf_extraction.py`（56 个用例）
+### 4.6 `tests/unit/test_pdf_extraction.py`（75 个用例）
 
 对应第二阶段 P0-1。测试样本全部由 `tests/unit/pdf_fixtures.py` 在运行时生成，
 仓库内不保存任何 PDF 二进制，也不使用真实客户账单。
@@ -144,6 +144,8 @@
 | `TestPdfPageModel` | 页码必须为正；字符数派生；摘要压缩空白；可序列化 |
 | `TestResultSerialization` | 必需字段齐备；失败时保持 `None` 不补 0 |
 | `TestParserMetadata` | 解析器名为 pypdf；版本取自实际安装库而非硬编码 |
+| `TestStatusSemantics` | **状态语义回归（测试 A/B/C/D）**：全部成功→`success`；单页失败（首/中/末页）→`partial` 且 `text_layer_available=True`、成功页文本与页码保留、失败页错误含页码；空白 PDF 与「全部页失败」→`needs_ocr`，且错误码区分 `no_text_layer` 与 `page_extraction_failed`；失败页不覆盖成功页诊断信息；`to_dict()`/`summarize()` 同时暴露 `is_complete` 与 `text_layer_available` |
+| `TestPartialStatusModelConstraints` | `partial` 必须满足：有文本层、有错误、至少一页有文本；`success` 不得带错误且必须有文本层；`failed` 不得含页面；`status` 必须是枚举；合法 `partial` 可正常构造 |
 
 ---
 

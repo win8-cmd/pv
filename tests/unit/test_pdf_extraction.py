@@ -26,6 +26,8 @@ from cenep.infrastructure.pdf.extractor import (
     ERROR_CODE_NOT_A_FILE,
     ERROR_CODE_NOT_FOUND,
     ERROR_CODE_NOT_PDF,
+    ERROR_CODE_NO_TEXT_LAYER,
+    ERROR_CODE_PAGE_EXTRACTION_FAILED,
     PARSER_NAME,
     PdfExtractionError,
     compute_file_hash,
@@ -274,6 +276,7 @@ class TestNoTextLayer:
         assert result.status is PdfExtractionStatus.NEEDS_OCR
         assert result.needs_ocr
         assert result.is_success is False
+        assert result.is_complete is False
         assert result.text_layer_available is False
         assert result.page_count == 2, "页数仍应如实反映文件结构"
 
@@ -308,6 +311,391 @@ class TestNoTextLayer:
                 text_layer_available=True,
                 pages=(page,),
             )
+
+
+# ---------------------------------------------------------------------------
+# 状态语义回归：SUCCESS / PARTIAL / NEEDS_OCR 三者必须互不混淆
+#
+# 背景：修复前"部分页面提取失败"与"整份文档没有文本层"都返回 NEEDS_OCR，
+# 且部分失败时 text_layer_available 被错误置为 False。
+# 这四组测试锁定修复后的语义。
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def failing_page():
+    """返回一个辅助函数：让**指定内容标记所在的那一页**的 ``extract_text()`` 抛异常。
+
+    用途：**真实触发**提取器的"单页提取失败"分支，而不是伪造结果对象。
+
+    实现要点（两次踩坑后确定）：
+
+    1. 不能替换 ``PageObject.extract_text`` 后无条件抛错——那会让**所有**页面
+       一起失败，从而根本测不出 `PARTIAL` 分支。
+    2. 也不能只替换某个页**实例**的方法——``extract_pdf`` 会自己新建
+       ``PdfReader``，每次取到的都是全新页对象，实例补丁覆盖不到它。
+
+    因此正确做法是：替换 ``pypdf._page.PageObject.extract_text``，
+    由包装函数**读取该页内容流**判断是否命中标记，只对命中的那一页抛错，
+    其余页调用原始实现。这样恰好只让一页失败。
+
+    用法::
+
+        with failing_page(path, "PAGE-TWO will fail"):
+            result = extract_pdf(path)
+    """
+    from contextlib import contextmanager
+    from unittest.mock import patch
+
+    import pypdf._page as page_module
+
+    from tests.unit.pdf_fixtures import find_page_number_by_marker
+
+    @contextmanager
+    def _fail(path, markers, message: str = "simulated extraction failure"):
+        """``markers`` 可以是单个标记字符串，也可以是标记列表。
+
+        列表用于制造"多页同时失败"（例如全部页面失败）的场景。
+        先确认每个标记都真实存在，避免标记写错导致"什么都没失败"却以为测到了。
+        """
+        if isinstance(markers, str):
+            markers = [markers]
+        marker_list = list(markers)
+        for marker in marker_list:
+            find_page_number_by_marker(path, marker)
+
+        original = page_module.PageObject.extract_text
+
+        def selective(self, *args, **kwargs):
+            try:
+                contents = self.get("/Contents")
+                data = contents.get_data() if contents is not None else b""
+                text = data.decode("latin-1", "replace")
+            except Exception:  # pragma: no cover - 结构异常时按未命中处理
+                text = ""
+            if any(marker in text for marker in marker_list):
+                raise RuntimeError(message)
+            return original(self, *args, **kwargs)
+
+        with patch.object(page_module.PageObject, "extract_text", selective):
+            yield marker_list
+
+    return _fail
+
+
+class TestStatusSemantics:
+    """步骤 3 要求的 A/B/C/D 四组回归测试。"""
+
+    # --- 测试 A：所有页面提取成功 ------------------------------------------
+    def test_a_all_pages_succeed_is_success(self, workdir: Path) -> None:
+        texts = ["PAGE-ALPHA content", "PAGE-BRAVO content", "PAGE-CHARLIE content"]
+        path = write_bytes(workdir / "all_ok.pdf", build_multipage_pdf(texts))
+        result = extract_pdf(path)
+
+        assert result.status is PdfExtractionStatus.SUCCESS, "全部页面成功时必须为 success"
+        assert result.is_complete is True
+        assert result.is_partial is False
+        assert result.text_layer_available is True
+        assert result.errors == ()
+        assert result.error_code is None
+
+        # 页面数量、页码与文本映射正确
+        assert result.page_count == 3
+        assert [page.page_number for page in result.pages] == [1, 2, 3]
+        for index, expected in enumerate(texts, start=1):
+            assert expected in result.page(index).text
+
+    # --- 测试 B：单页提取失败，其他页面成功 --------------------------------
+    def test_b_single_page_failure_is_partial_not_needs_ocr(
+        self, workdir: Path, failing_page
+    ) -> None:
+        texts = ["PAGE-ONE keep me", "PAGE-TWO will fail", "PAGE-THREE keep me too"]
+        path = write_bytes(workdir / "partial.pdf", build_multipage_pdf(texts))
+
+        with failing_page(path, "PAGE-TWO will fail", "simulated failure on page 2"):
+            result = extract_pdf(path)
+
+        # 不得返回表示完整成功的 SUCCESS
+        assert result.status is not PdfExtractionStatus.SUCCESS
+        # 必须明确返回部分提取状态
+        assert result.status is PdfExtractionStatus.PARTIAL
+        assert result.is_partial is True
+        assert result.is_complete is False
+
+        # 不得把"部分失败"错误等同于"整份文档没有文本层"
+        assert result.status is not PdfExtractionStatus.NEEDS_OCR
+        assert result.needs_ocr is False
+
+        # 文本确实可用（这是与 NEEDS_OCR 的本质区别）
+        assert result.text_layer_available is True
+
+        # 成功页面的文本与页码均被保留
+        assert result.page_count == 3
+        assert [page.page_number for page in result.pages] == [1, 2, 3]
+        assert "PAGE-ONE keep me" in result.page(1).text
+        assert "PAGE-THREE keep me too" in result.page(3).text
+        assert len(result.pages_with_text()) == 2
+
+        # 失败页的错误信息被保留，且指明了页码
+        assert result.errors, "失败页必须留下错误信息"
+        assert any("第 2 页" in message for message in result.errors)
+        assert result.error_code == ERROR_CODE_PAGE_EXTRACTION_FAILED
+        assert result.extraction_error_count == 1
+
+    def test_b_first_page_failure_also_partial(self, workdir: Path, failing_page) -> None:
+        """首页失败同样应判为 PARTIAL（边界页）。"""
+        path = write_bytes(workdir / "p1.pdf", build_multipage_pdf(["FIRST fails", "SECOND ok"]))
+        with failing_page(path, "FIRST fails"):
+            result = extract_pdf(path)
+
+        assert result.status is PdfExtractionStatus.PARTIAL
+        assert "SECOND ok" in result.page(2).text
+        assert any("第 1 页" in message for message in result.errors)
+
+    def test_b_last_page_failure_also_partial(self, workdir: Path, failing_page) -> None:
+        """末页失败同样应判为 PARTIAL（边界页）。"""
+        path = write_bytes(workdir / "plast.pdf", build_multipage_pdf(["FIRST ok", "LAST fails"]))
+        with failing_page(path, "LAST fails"):
+            result = extract_pdf(path)
+
+        assert result.status is PdfExtractionStatus.PARTIAL
+        assert "FIRST ok" in result.page(1).text
+        assert any("第 2 页" in message for message in result.errors)
+
+    def test_b_partial_result_is_constructible_without_error(
+        self, workdir: Path, failing_page
+    ) -> None:
+        """构造 PARTIAL 领域模型不得产生未处理异常。"""
+        path = write_bytes(workdir / "ok.pdf", build_multipage_pdf(["one text", "two text"]))
+        with failing_page(path, "one text"):
+            result = extract_pdf(path)  # 不应抛异常
+        assert isinstance(result, PdfExtractionResult)
+
+    # --- 测试 C：整份 PDF 没有可用文本 ------------------------------------
+    def test_c_blank_pdf_is_needs_ocr(self, workdir: Path) -> None:
+        path = write_bytes(workdir / "blank.pdf", build_blank_pdf(3))
+        result = extract_pdf(path)
+
+        assert result.status is PdfExtractionStatus.NEEDS_OCR
+        assert result.status is not PdfExtractionStatus.SUCCESS
+        assert result.status is not PdfExtractionStatus.PARTIAL
+        assert result.needs_ocr is True
+        assert result.is_complete is False
+
+        # 符合正式定义：整份文档没有可用文本
+        assert result.text_layer_available is False
+        assert result.pages_with_text() == ()
+        # 页数仍然如实反映文件结构
+        assert result.page_count == 3
+        # 无页面级失败，错误码应指向"没有文本层"而非"提取失败"
+        assert result.errors == ()
+        assert result.error_code == ERROR_CODE_NO_TEXT_LAYER
+
+    def test_c_all_pages_failing_is_needs_ocr_with_distinct_code(
+        self, workdir: Path, failing_page
+    ) -> None:
+        """所有页面均提取失败：结果同为 NEEDS_OCR，但错误码必须区分原因。"""
+        path = write_bytes(
+            workdir / "allfail.pdf",
+            build_multipage_pdf(["first page text", "second page text"]),
+        )
+        with failing_page(path, ["first page text", "second page text"]):
+            result = extract_pdf(path)
+
+        assert result.status is PdfExtractionStatus.NEEDS_OCR
+        assert result.status is not PdfExtractionStatus.PARTIAL
+        assert result.text_layer_available is False
+        assert len(result.errors) == 2, "两页失败都应留下错误信息"
+        # 与"文档本身没有文本层"区分开
+        assert result.error_code == ERROR_CODE_PAGE_EXTRACTION_FAILED
+        assert result.error_code != ERROR_CODE_NO_TEXT_LAYER
+
+    def test_c_partial_and_needs_ocr_are_distinguishable(
+        self, workdir: Path, failing_page
+    ) -> None:
+        """同样是"有页面失败"，结果取决于是否拿到了可用文本。"""
+        partial_path = write_bytes(
+            workdir / "has_text.pdf", build_multipage_pdf(["useful text here", "second page"])
+        )
+        with failing_page(partial_path, "useful text here"):
+            partial = extract_pdf(partial_path)
+
+        blank_path = write_bytes(workdir / "no_text.pdf", build_blank_pdf(2))
+        no_text = extract_pdf(blank_path)
+
+        assert partial.status is PdfExtractionStatus.PARTIAL
+        assert no_text.status is PdfExtractionStatus.NEEDS_OCR
+        assert partial.status is not no_text.status
+        assert partial.text_layer_available is True
+        assert no_text.text_layer_available is False
+
+    # --- 测试 D：单页失败不影响其他页面的诊断信息 -------------------------
+    def test_d_failure_does_not_overwrite_successful_pages(
+        self, workdir: Path, failing_page
+    ) -> None:
+        texts = ["KEEP-ONE marker", "FAIL-TWO marker", "KEEP-THREE marker"]
+        path = write_bytes(workdir / "diag.pdf", build_multipage_pdf(texts))
+
+        with failing_page(path, "FAIL-TWO marker"):
+            result = extract_pdf(path)
+
+        # 成功页文本未被错误记录覆盖或清空
+        assert result.page(1).text.strip() == "KEEP-ONE marker"
+        assert result.page(3).text.strip() == "KEEP-THREE marker"
+
+        # 失败页为空文本，但不影响它仍占据正确的页码位置
+        assert result.page(2).page_number == 2
+        assert result.page(2).has_text is False
+        assert result.page(2).text == ""
+
+        # 成功页与失败页可被准确区分
+        assert [page.page_number for page in result.pages_with_text()] == [1, 3]
+        assert [page.page_number for page in result.failed_pages] == [2]
+
+        # 错误记录只针对失败页，且不包含成功页文本
+        assert len(result.errors) == 1
+        assert "第 2 页" in result.errors[0]
+        assert "KEEP-ONE" not in result.errors[0]
+        assert "KEEP-THREE" not in result.errors[0]
+
+    def test_d_to_dict_reports_completeness_flags(self, workdir: Path, failing_page) -> None:
+        """序列化结果必须同时暴露文本可用性与提取完整性两个维度。"""
+        path = write_bytes(workdir / "flags.pdf", build_multipage_pdf(["alpha text", "beta text"]))
+        with failing_page(path, "alpha text"):
+            payload = extract_pdf(path).to_dict()
+
+        assert payload["status"] == "partial"
+        assert payload["text_layer_available"] is True
+        assert payload["is_complete"] is False
+        assert payload["is_partial"] is True
+        assert payload["error_code"] == ERROR_CODE_PAGE_EXTRACTION_FAILED
+
+    def test_d_summarize_reports_completeness_flags(self, workdir: Path, failing_page) -> None:
+        path = write_bytes(workdir / "sum.pdf", build_multipage_pdf(["alpha text", "beta text"]))
+        with failing_page(path, "alpha text"):
+            payload = summarize(extract_pdf(path))
+
+        assert payload["status"] == "partial"
+        assert payload["is_complete"] is False
+        assert payload["is_partial"] is True
+        assert payload["extraction_error_count"] == 1
+        assert payload["text_layer_available"] is True
+
+
+class TestPartialStatusModelConstraints:
+    """PARTIAL 状态在领域模型层面的约束（防止语义自相矛盾）。"""
+
+    def test_partial_requires_text_layer(self) -> None:
+        page = PdfPage(page_number=1, text="abc")
+        with pytest.raises(ValueError, match="必须存在可用文本层"):
+            PdfExtractionResult(
+                file_hash="d" * 64,
+                file_name="x.pdf",
+                file_size_bytes=1,
+                page_count=1,
+                status=PdfExtractionStatus.PARTIAL,
+                text_layer_available=False,
+                pages=(page,),
+                errors=("第 1 页失败",),
+            )
+
+    def test_partial_requires_errors(self) -> None:
+        page = PdfPage(page_number=1, text="abc")
+        with pytest.raises(ValueError, match="必须记录导致不完整的错误"):
+            PdfExtractionResult(
+                file_hash="e" * 64,
+                file_name="x.pdf",
+                file_size_bytes=1,
+                page_count=1,
+                status=PdfExtractionStatus.PARTIAL,
+                text_layer_available=True,
+                pages=(page,),
+                errors=(),
+            )
+
+    def test_partial_requires_at_least_one_page_with_text(self) -> None:
+        page = PdfPage(page_number=1, text="")
+        with pytest.raises(ValueError, match="至少有一页成功提取到文本"):
+            PdfExtractionResult(
+                file_hash="f" * 64,
+                file_name="x.pdf",
+                file_size_bytes=1,
+                page_count=1,
+                status=PdfExtractionStatus.PARTIAL,
+                text_layer_available=True,
+                pages=(page,),
+                errors=("第 1 页失败",),
+            )
+
+    def test_success_rejects_errors(self) -> None:
+        page = PdfPage(page_number=1, text="abc")
+        with pytest.raises(ValueError, match="不应存在页面提取错误"):
+            PdfExtractionResult(
+                file_hash="1" * 64,
+                file_name="x.pdf",
+                file_size_bytes=1,
+                page_count=1,
+                status=PdfExtractionStatus.SUCCESS,
+                text_layer_available=True,
+                pages=(page,),
+                errors=("不应该有错误",),
+            )
+
+    def test_success_requires_text_layer(self) -> None:
+        page = PdfPage(page_number=1, text="abc")
+        with pytest.raises(ValueError, match="必须存在可用文本层"):
+            PdfExtractionResult(
+                file_hash="2" * 64,
+                file_name="x.pdf",
+                file_size_bytes=1,
+                page_count=1,
+                status=PdfExtractionStatus.SUCCESS,
+                text_layer_available=False,
+                pages=(page,),
+            )
+
+    def test_failed_rejects_pages(self) -> None:
+        page = PdfPage(page_number=1, text="abc")
+        with pytest.raises(ValueError, match="不应包含已解析的页面"):
+            PdfExtractionResult(
+                file_hash="3" * 64,
+                file_name="x.pdf",
+                file_size_bytes=1,
+                page_count=1,
+                status=PdfExtractionStatus.FAILED,
+                pages=(page,),
+            )
+
+    def test_status_must_be_enum(self) -> None:
+        with pytest.raises(TypeError, match="PdfExtractionStatus"):
+            PdfExtractionResult(
+                file_hash="4" * 64,
+                file_name="x.pdf",
+                file_size_bytes=1,
+                page_count=0,
+                status="success",  # type: ignore[arg-type]
+            )
+
+    def test_valid_partial_construction(self) -> None:
+        """合法的 PARTIAL 必须可正常构造（约束不能把正确用法也挡住）。"""
+        pages = (PdfPage(page_number=1, text="可用文本"), PdfPage(page_number=2, text=""))
+        result = PdfExtractionResult(
+            file_hash="5" * 64,
+            file_name="x.pdf",
+            file_size_bytes=1,
+            page_count=2,
+            status=PdfExtractionStatus.PARTIAL,
+            text_layer_available=True,
+            pages=pages,
+            errors=("第 2 页文本提取失败",),
+            error_code=ERROR_CODE_PAGE_EXTRACTION_FAILED,
+        )
+        assert result.is_partial is True
+        assert result.is_complete is False
+        assert result.text_layer_available is True
+        assert result.extraction_error_count == 1
+        assert [p.page_number for p in result.pages_with_text()] == [1]
+        assert [p.page_number for p in result.failed_pages] == [2]
 
 
 # ---------------------------------------------------------------------------

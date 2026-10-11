@@ -37,12 +37,21 @@ from cenep.domain.pdf_extraction import (
 )
 
 __all__ = [
+    "ERROR_CODE_CORRUPT",
+    "ERROR_CODE_EMPTY_FILE",
+    "ERROR_CODE_NOT_A_FILE",
+    "ERROR_CODE_NOT_FOUND",
+    "ERROR_CODE_NOT_PDF",
+    "ERROR_CODE_NO_TEXT_LAYER",
+    "ERROR_CODE_PAGE_EXTRACTION_FAILED",
+    "ERROR_CODE_UNEXPECTED",
     "HASH_CHUNK_SIZE",
     "PARSER_NAME",
     "PdfExtractionError",
     "compute_file_hash",
     "extract_pdf",
     "parser_version",
+    "summarize",
 ]
 
 #: 解析器名称，写入结果用于追溯。
@@ -58,6 +67,20 @@ ERROR_CODE_EMPTY_FILE = "empty_file"
 ERROR_CODE_NOT_PDF = "not_a_pdf"
 ERROR_CODE_CORRUPT = "corrupt_pdf"
 ERROR_CODE_UNEXPECTED = "unexpected_error"
+ERROR_CODE_NO_TEXT_LAYER = "no_text_layer"
+"""文档本身没有可提取的文本（疑似扫描件），需要 OCR。"""
+
+ERROR_CODE_PAGE_EXTRACTION_FAILED = "page_extraction_failed"
+"""存在页面文本提取失败。
+
+配合状态使用：
+
+- 状态为 ``PARTIAL``：部分页面失败，但其它页面文本可用；
+- 状态为 ``NEEDS_OCR``：所有页面均提取失败，最终没拿到可用文本。
+
+上层据此可以区分"读取失败"与"文档无文本层"这两种不同原因，
+不必去解析 ``errors`` 里的自然语言。
+"""
 
 
 class PdfExtractionError(Exception):
@@ -256,21 +279,11 @@ def extract_pdf(path: str | Path) -> PdfExtractionResult:
             raw = reader.pages[index].extract_text()
             text = normalize_page_text(raw)
         except Exception as exc:  # noqa: BLE001 - 单页失败不应导致整篇失败
-            # 单页提取失败：该页留空并记录，其余页继续，且整篇状态降级为需复核
+            # 单页提取失败：该页留空并记录，其余页继续。
+            # 整篇状态由下面的决策表判定，不会把"部分失败"伪装成成功。
             text = ""
             errors.append(f"第 {page_number} 页文本提取失败：{type(exc).__name__}: {exc}")
         pages.append(PdfPage(page_number=page_number, text=text, char_count=len(text)))
-
-    meaningful_total = sum(len(page.text.strip()) for page in pages)
-    text_layer_available = meaningful_total >= MIN_MEANINGFUL_CHARS
-
-    if text_layer_available and not errors:
-        status = PdfExtractionStatus.SUCCESS
-    elif text_layer_available and errors:
-        # 有文本但存在单页失败：能给出文本层，但不能声称完全成功
-        status = PdfExtractionStatus.NEEDS_OCR
-    else:
-        status = PdfExtractionStatus.NEEDS_OCR
 
     if not pages and page_count == 0:
         return _failure(
@@ -281,11 +294,31 @@ def extract_pdf(path: str | Path) -> PdfExtractionResult:
             message="PDF 不含任何页面。",
         )
 
-    error_code: str | None = None
-    if status is PdfExtractionStatus.NEEDS_OCR and not errors:
-        error_code = "no_text_layer"
+    # 文档整体是否存在可用文本（**不包含**"所有页面都成功"的含义）
+    meaningful_total = sum(len(page.text.strip()) for page in pages)
+    text_layer_available = meaningful_total >= MIN_MEANINGFUL_CHARS
+
+    # 状态决策表（四象限，互斥且穷尽）：
+    #
+    #   文本可用 + 无错误  -> SUCCESS        完整可用
+    #   文本可用 + 有错误  -> PARTIAL        文本可用但结果不完整
+    #   无文本   + 有错误  -> NEEDS_OCR      提取失败导致拿不到文本
+    #   无文本   + 无错误  -> NEEDS_OCR      文档本身没有文本层（疑似扫描件）
+    #
+    # 关键：第三种与第四种都是 NEEDS_OCR（结果同为"没有可用文本"），
+    # 但用 error_code 区分原因，避免把"读取失败"误报成"扫描件"。
+    if text_layer_available and not errors:
+        status = PdfExtractionStatus.SUCCESS
+        error_code: str | None = None
+    elif text_layer_available and errors:
+        status = PdfExtractionStatus.PARTIAL
+        error_code = ERROR_CODE_PAGE_EXTRACTION_FAILED
     elif errors:
-        error_code = "page_extraction_failed"
+        status = PdfExtractionStatus.NEEDS_OCR
+        error_code = ERROR_CODE_PAGE_EXTRACTION_FAILED
+    else:
+        status = PdfExtractionStatus.NEEDS_OCR
+        error_code = ERROR_CODE_NO_TEXT_LAYER
 
     return PdfExtractionResult(
         file_hash=file_hash,
@@ -293,7 +326,8 @@ def extract_pdf(path: str | Path) -> PdfExtractionResult:
         file_size_bytes=file_size,
         page_count=page_count,
         status=status,
-        text_layer_available=text_layer_available and status is PdfExtractionStatus.SUCCESS,
+        # 文本可用性如实反映"文档里有没有文本"，与提取是否完整无关
+        text_layer_available=text_layer_available,
         pages=tuple(pages),
         parser_name=PARSER_NAME,
         parser_version=parser_version(),
@@ -310,9 +344,12 @@ def summarize(result: PdfExtractionResult) -> dict[str, Any]:
     return {
         "file_name": result.file_name,
         "status": result.status.value,
+        "is_complete": result.is_complete,
+        "is_partial": result.is_partial,
         "page_count": result.page_count,
         "text_layer_available": result.text_layer_available,
         "total_char_count": result.total_char_count,
+        "extraction_error_count": result.extraction_error_count,
         "error_code": result.error_code,
         "errors": list(result.errors),
     }

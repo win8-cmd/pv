@@ -140,7 +140,7 @@
 
 | 文件 | 内容 | 子任务 |
 |---|---|---|
-| `src/cenep/domain/pdf_extraction.py` | 纯领域模型：`PdfPage`、`PdfExtractionResult`、`PdfExtractionStatus`（不得依赖 pypdf） | P0-1 |
+| `src/cenep/domain/pdf_extraction.py` | 纯领域模型：`PdfPage`、`PdfExtractionResult`、`PdfExtractionStatus`（含 `success`/`partial`/`needs_ocr`/`failed`/`duplicate`）；不得依赖 pypdf | P0-1 |
 | `src/cenep/infrastructure/pdf/extractor.py` | `pypdf` 页级文本提取、SHA-256、文本层判定、异常映射 | P0-1 |
 | `src/cenep/infrastructure/pdf/__init__.py` | 包声明 | P0-1 |
 | `tests/unit/test_pdf_extraction.py` | P0-1 的 12 项必测情况 | P0-1 |

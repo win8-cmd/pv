@@ -32,10 +32,11 @@ from pypdf.generic import (
 )
 
 __all__ = [
-    "build_cjk_pdf",
     "build_blank_pdf",
+    "build_cjk_pdf",
     "build_multipage_pdf",
     "build_single_page_pdf",
+    "find_page_number_by_marker",
     "write_bytes",
 ]
 
@@ -171,6 +172,44 @@ def build_single_page_pdf(text: str = "CENEP single page bill") -> bytes:
     buffer = io.BytesIO()
     writer.write(buffer)
     return buffer.getvalue()
+
+
+def _page_content_text(page) -> str | None:
+    """读出该页内容流中的原始文本（用于诊断与测试定位）。
+
+    返回 ``None`` 表示该页没有内容流。
+    """
+    from pypdf.generic import DecodedStreamObject  # noqa: PLC0415
+
+    contents = page.get("/Contents")
+    if contents is None:
+        return None
+    try:
+        data = contents.get_data()
+    except Exception:  # pragma: no cover - 结构异常时按无内容处理
+        return None
+    return data.decode("latin-1", "replace")
+
+
+def find_page_number_by_marker(path: Path | str, marker: str) -> int:
+    """按内容中的标记定位页码（从 1 开始）。
+
+    **为什么需要它**：要在测试中让"某个特定页面提取失败"，
+    不能替换 ``PageObject`` 的类方法——那会让**所有**页面一起失败，
+    从而测不出"部分失败"这一分支。这里改为按页面内容精确定位页码，
+    再由调用方按实例注入故障。
+
+    Raises:
+        ValueError: 没有任何页面包含该标记。
+    """
+    from pypdf import PdfReader  # noqa: PLC0415
+
+    reader = PdfReader(str(path))
+    for index, page in enumerate(reader.pages, start=1):
+        content = _page_content_text(page)
+        if content and marker in content:
+            return index
+    raise ValueError(f"未在任何页面中找到标记 {marker!r}")
 
 
 def build_multipage_pdf(pages_text: list[str]) -> bytes:

@@ -34,19 +34,47 @@ __all__ = [
 class PdfExtractionStatus(str, Enum):
     """单次 PDF 提取的总体状态。
 
+    状态必须能区分**三种本质不同**的结果（这是本枚举的核心设计目标）：
+
+    1. 文本可用且抽取完整 → :attr:`SUCCESS`；
+    2. 文本可用但抽取**不完整**（部分页面失败） → :attr:`PARTIAL`；
+    3. 整份文档拿不到可用文本 → :attr:`NEEDS_OCR`。
+
+    历史上第 2 种曾与第 3 种共用 ``NEEDS_OCR``，导致"部分页面读取失败"
+    与"整份扫描件无文本层"无法区分——前者是**数据不完整但可用**，
+    后者是**根本没有文本**。二者对账单导入、人工复核与错误处理的含义完全不同。
+
     ``DUPLICATE`` 虽在任务书 4.4 中列出，但它属于"与已有记录比较"的结论，
     需要数据库或应用层参与，因此**不由提取器产生**；此处保留该取值，
     供应用服务层在识别到重复文件时使用。
     """
 
     SUCCESS = "success"
-    """文本提取成功，且至少有一页存在可用文本层。"""
+    """**所有**页面均完成提取，且整份文档满足可用文本判断条件。"""
+
+    PARTIAL = "partial"
+    """文档中存在可用文本，但至少一页提取失败，结果**不完整**。
+
+    语义要点：
+
+    - ``text_layer_available`` 为 ``True``（文本确实可用）；
+    - ``is_complete`` 为 ``False``（结果不完整，不得当作完整账单使用）；
+    - 成功页面的文本与页码**全部保留**，失败页的错误信息也全部保留。
+
+    上层必须把该状态识别为"需要人工复核/重新提取"，**不得**当成完整结果，
+    也不得等同于"整份文档没有文本层"。
+    """
 
     NEEDS_OCR = "needs_ocr"
-    """文件可正常打开，但没有可用文本层（疑似扫描件）。
+    """整份文档没有获得可用文本，后续可能需要 OCR 或其他文本获取方式。
 
-    注意：这**不是失败**，也不等于已提取到内容；上层必须提示需要 OCR，
-    而不是把它当作解析成功。
+    包括两种子情形，可用 ``error_code`` 区分：
+
+    - ``no_text_layer``：页面本身没有可提取文本（疑似扫描件）；
+    - ``page_extraction_failed``：所有页面提取均失败。
+
+    注意：这**不是失败（FAILED）**，文件结构与页数仍然有效；
+    但它也**绝不是解析成功**，上层必须提示需要 OCR。
     """
 
     FAILED = "failed"
@@ -162,6 +190,15 @@ class PdfExtractionResult:
     page_count: int
     status: PdfExtractionStatus
     text_layer_available: bool = False
+    """**文档是否存在可用文本**（整篇可见字符数达到阈值）。
+
+    该字段的正式定义**不包含**"所有页面都提取成功"的含义。
+    完整性问题请用 :attr:`is_complete` 或 :attr:`status` 判断：
+
+    - ``PARTIAL`` 时本字段可以为 ``True``（文本可用，但结果不完整）；
+    - ``NEEDS_OCR`` / ``FAILED`` 时本字段必定为 ``False``。
+    """
+
     pages: tuple[PdfPage, ...] = field(default_factory=tuple)
     parser_name: str = ""
     parser_version: str = ""
@@ -183,26 +220,90 @@ class PdfExtractionResult:
             raise ValueError(
                 f"page_count({self.page_count}) 与 pages 长度({len(self.pages)}) 不一致"
             )
-        # 只有成功才允许声称有文本层，防止把扫描件误标为可用
-        if self.text_layer_available and self.status is not PdfExtractionStatus.SUCCESS:
-            raise ValueError(
-                f"状态为 {self.status.value} 时不得声称存在可用文本层"
-            )
+        if not isinstance(self.status, PdfExtractionStatus):
+            raise TypeError(f"status 必须是 PdfExtractionStatus，实际为 {type(self.status).__name__}")
+
+        self._check_status_consistency()
+
+    def _check_status_consistency(self) -> None:
+        """校验状态与其它字段之间不存在自相矛盾的组合。
+
+        这些约束把"状态语义"固化在类型层面，而不是只靠调用方自觉。
+        """
+        status = self.status
+
+        if status is PdfExtractionStatus.SUCCESS:
+            if self.errors:
+                raise ValueError("状态为 success 时不应存在页面提取错误")
+            if not self.text_layer_available:
+                raise ValueError("状态为 success 时必须存在可用文本层")
+            if not self.pages:
+                raise ValueError("状态为 success 时必须包含页面")
+
+        if status is PdfExtractionStatus.PARTIAL:
+            if not self.text_layer_available:
+                raise ValueError(
+                    "状态为 partial 时必须存在可用文本层；"
+                    "若整份文档都没有可用文本，应使用 needs_ocr"
+                )
+            if not self.errors:
+                raise ValueError("状态为 partial 时必须记录导致不完整的错误")
+            if not self.pages_with_text():
+                raise ValueError("状态为 partial 时必须至少有一页成功提取到文本")
+
+        if status in (PdfExtractionStatus.NEEDS_OCR, PdfExtractionStatus.FAILED):
+            if self.text_layer_available:
+                raise ValueError(
+                    f"状态为 {status.value} 时不得声称存在可用文本层"
+                )
+
+        if status is PdfExtractionStatus.FAILED and self.page_count:
+            raise ValueError("状态为 failed 时不应包含已解析的页面")
 
     @property
     def is_success(self) -> bool:
-        """提取是否成功。"""
+        """是否**完整**提取成功（等同于 :attr:`is_complete`）。"""
+        return self.status is PdfExtractionStatus.SUCCESS
+
+    @property
+    def is_partial(self) -> bool:
+        """是否只完成**部分**提取（有文本但结果不完整）。"""
+        return self.status is PdfExtractionStatus.PARTIAL
+
+    @property
+    def is_complete(self) -> bool:
+        """本次提取结果是否完整。
+
+        只有 :attr:`PdfExtractionStatus.SUCCESS` 视为完整。
+        账单导入必须用本属性判断"能否当作完整账单使用"，
+        **不得**用 ``text_layer_available`` 代替——后者只表示文本是否可用。
+        """
         return self.status is PdfExtractionStatus.SUCCESS
 
     @property
     def needs_ocr(self) -> bool:
-        """是否需要 OCR 才能获得文本。"""
+        """是否整份文档都没有获得可用文本。"""
         return self.status is PdfExtractionStatus.NEEDS_OCR
 
     @property
     def is_failed(self) -> bool:
         """是否解析失败。"""
         return self.status is PdfExtractionStatus.FAILED
+
+    @property
+    def failed_pages(self) -> tuple[PdfPage, ...]:
+        """提取失败的页面（在本模型中失败页以空文本表示）。
+
+        Note:
+            空页与失败页在文本层面无法区分，因此这里返回"无文本的页面"，
+            具体哪些页失败请看 :attr:`errors`（每条含页码）。
+        """
+        return tuple(page for page in self.pages if not page.has_text)
+
+    @property
+    def extraction_error_count(self) -> int:
+        """页面级提取错误数量。"""
+        return len(self.errors)
 
     @property
     def total_char_count(self) -> int:
@@ -234,6 +335,8 @@ class PdfExtractionResult:
             "file_size_bytes": self.file_size_bytes,
             "page_count": self.page_count,
             "text_layer_available": self.text_layer_available,
+            "is_complete": self.is_complete,
+            "is_partial": self.is_partial,
             "parser_name": self.parser_name,
             "parser_version": self.parser_version,
             "status": self.status.value,
