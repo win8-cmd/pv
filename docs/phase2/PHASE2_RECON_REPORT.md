@@ -7,6 +7,11 @@
 
 ---
 
+> **数字时效说明**：本报告是**核查当时（2026-10-11 第二阶段开工前）的快照**，
+> 其中"244 个用例"指当时 `main` 分支的基线数量。
+> 本报告**不作为**当前测试数量的依据——当前数量请以
+> `python -m pytest --collect-only -q` 实测为准（详见 `docs/TEST_PLAN.md`）。
+
 ## 1. 远程仓库实际状态
 
 **不采信任务书给出的基线，先实测远程。**
@@ -38,7 +43,7 @@
 | 5. `SCHEMA_VERSION` | `1`（12 张表全部已建，含 11 张业务表） |
 | 6. 迁移机制 | `MIGRATIONS: dict[int, tuple[str, ...]] = {}` 已就位；`_apply_migrations()` 按版本阶梯执行，缺步骤即抛 `SchemaVersionError`；**当前注册表为空**（无历史版本可迁） |
 | 7. 文件导入机制 | **不存在**。`Document` 只有模型与建表，没有任何文件读取/登记代码 |
-| 8. 测试数量与命令 | **244 个用例**；`python -m pytest -p no:cacheprovider`；`--collect-only -q` 得 7 个文件 244 例 |
+| 8. 测试数量与命令 | **244 个用例**（核查当时 `main` 基线）；`python -m pytest -p no:cacheprovider`；`--collect-only -q` 得 7 个文件 244 例 |
 | 9. UI 框架 | PySide6 6.12.0；`MainWindow`（项目 CRUD + 消纳计算演示）+ `ProjectDialog`；界面通过 `ProjectService` 访问业务 |
 | 10. PDF 解析依赖 | **无**。`pyproject.toml` 依赖仅 `PySide6>=6.6`、`pandas>=2.0`、`openpyxl>=3.1`；dev 为 `pytest`、`pytest-cov`。`test_layering.py` 显式禁止第一阶段引入 PDF 库 |
 | 11. Python 版本 | `requires-python = ">=3.11"`；本机 3.14.7；CI 实测 3.11.17 与 3.14.8 |
