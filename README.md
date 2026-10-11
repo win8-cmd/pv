@@ -4,6 +4,9 @@
 - 当前阶段：**第一阶段：工程骨架与核心规则冻结**
 - 仓库：https://github.com/win8-cmd/pv
 - 开发分支：`main`
+- 当前状态：第一阶段已完成，**正在 PR #1 审阅中，尚未合并到 `main`**
+  （审阅分支 `fix/stage1-review-memory-db-and-schema-version`；PR:
+  https://github.com/win8-cmd/pv/pull/1 ）
 
 ---
 

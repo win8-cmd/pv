@@ -10,6 +10,8 @@
 
 | 轮次 | 日期 | 任务 | 分支 | 结论 | 用例数 | CI |
 |---|---|---|---|---:|---|
+| R6 | 2026-10-11 | 记录本轮 CI 实测结论 | `fix/stage1-review-memory-db-and-schema-version` | 通过（待授权合并） | 244 | 全绿（见 R6） |
+| R5 | 2026-10-11 | 合并前最终复核与文档版本同步 | `fix/stage1-review-memory-db-and-schema-version` | 通过（本地证据） | 244 | 结果见 R6 |
 | R4 | 2026-10-11 | 元数据完整性修复与测试数量统一 | `fix/stage1-review-memory-db-and-schema-version` | 通过（待审阅合并） | 244 | 全绿 |
 | R3 | 2026-10-11 | 建立完成结论日志与每轮更新约定 | `fix/stage1-review-memory-db-and-schema-version` | 完成（待随 PR #1 合并） | 234 | 全绿 |
 | R2 | 2026-10-11 | 第一阶段代码复核与缺陷修复 | `fix/stage1-review-memory-db-and-schema-version` | 通过（待审阅合并） | 234 | 全绿 |
@@ -17,21 +19,194 @@
 
 ---
 
-## 2. R4 — 元数据完整性修复与测试数量统一
+## 2. R5 — 合并前最终复核与文档版本同步
+
+- 完成日期：2026-10-11
+- 任务来源：第一阶段最终修正与合并前验收执行任务书
+- 分支：`fix/stage1-review-memory-db-and-schema-version`
+- 结论：**通过**（等待仓库所有者授权合并，本轮未合并 PR）
+
+### 2.1 执行前的远程状态核对
+
+不直接采信任务书给出的提交号，先实测远程：
+
+| 项目 | 实测值 |
+|---|---|
+| 本地分支 | `fix/stage1-review-memory-db-and-schema-version` |
+| 本地 HEAD | `f9edf8e572b4cc1360cd91d34cd59bfbe016e0fb` |
+| 远程分支 SHA | `f9edf8e572b4cc1360cd91d34cd59bfbe016e0fb` |
+| 与远程差异 | `0 0`（完全同步） |
+| `main` 远程 SHA | `5494436195dbc1a81eb61717ee79722768618964`（本轮**未触碰**） |
+| 工作区状态 | 干净，无未提交变更，无需要归属识别的他人改动 |
+
+任务书所述的"最新提交 f9edf8e"经核对属实。
+
+### 2.2 实际修改的文件及原因
+
+本轮**未修改任何代码与测试**（元数据保护逻辑经复核已完整，见 2.3），
+仅修正文档的当前状态描述：
+
+| 文件 | 修改内容 | 原因 |
+|---|---|---|
+| `docs/TEST_PLAN.md` | 文档版本 `2026.10-stage1-r3` → `r4` | 内容已记录 R4 的实测结果，但版本标识未跟上，与 `PROGRESS_LOG` 记录的轮次不一致 |
+| `docs/ACCEPTANCE_CRITERIA.md` | 文档版本 `2026.10-stage1-r2` → `2026.10-stage1-r4`（标题改为"第 4 版：合并前最终复核"）；补充 4 个版本的对照表与"文档版本命名口径"说明 | 文档内容早已覆盖 R3/R4（含新增 A17），但版本号仍停留在 r2，属自相矛盾 |
+| `README.md` | 顶部补充"当前状态：第一阶段已完成，正在 PR #1 审阅中，尚未合并到 `main`"，并给出审阅分支与 PR 链接 | 原文只写"开发分支 main"，易被误认为代码已在 main，与实际不符 |
+| `docs/AI_DEVELOPMENT_GUIDE.md` | 第 9 节第 6 条由"`main` 分支尚无任何提交"改为当前真实状态（main 已有 3 个提交、改动走分支 + PR）；第 2 条补充强制推送的**唯一例外条件**及其核验要求 | 前者是过期陈述；后者与 R1 中"经授权改写作者身份"的史实冲突，未说明例外会让后续开发者无法解释既有历史 |
+
+**未改动**：`src/`、`tests/` 下任何文件。
+
+### 2.3 数据库元数据保护逻辑复核结论
+
+对 `src/cenep/infrastructure/database.py` 与
+`tests/integration/test_database_memory_and_schema_version.py` 逐条复核，
+任务书列出的四组规则**均成立**，因此按要求**未重复修改代码**：
+
+| 规则 | 代码依据 | 测试依据 | 结论 |
+|---|---|---|---|
+| 4.1 真正的新数据库可初始化 | `_read_schema_state()` 在 `schema_meta` 不存在时返回 `(False, MISSING_VERSION)`；`initialize_schema()` 走 `_apply_schema()` 建表、建索引并写入版本号 | `TestMissingVersionRecordIsNotTreatedAsNewDatabase::test_truly_empty_database_is_still_initializable` | 成立 |
+| 4.2 元数据不完整必须拒绝 | 表存在但无记录或值为 `NULL` → `(True, MISSING_VERSION)` → 抛 `SchemaVersionError`，且**在写入任何内容之前**抛出 | `test_initialize_rejects_missing_version_record`、`test_initialize_does_not_write_current_version`、`test_null_version_value_is_not_treated_as_new_database`、`test_empty_meta_table_without_version_is_rejected` | 成立 |
+| 4.2 不当作新库、不写版本号、不补表 | 拒绝路径无任何 `CREATE`/`INSERT`/`UPDATE`；`schema_meta` 与结构保持原样 | `test_initialize_does_not_write_current_version`（版本行仍缺失）、`test_initialize_does_not_adopt_structure_when_other_tables_exist`（`report` 表未被补回、表集合不变）、`test_metadata_table_existing_alone_is_rejected`（未补齐业务表） | 成立 |
+| 4.2 不破坏已有业务数据 | 拒绝路径只读；业务表与数据不动 | `test_business_data_survives_rejected_initialization`（写入项目后拒绝，`count()` 仍为 1） | 成立 |
+| 4.3 当前版本幂等 | `stored == SCHEMA_VERSION` 分支仅执行 `CREATE ... IF NOT EXISTS`，不改版本号 | `test_current_version_is_idempotent`、`test_current_version_preserves_existing_data`、`test_current_version_with_missing_tables_is_repaired` | 成立 |
+| 4.3 高于支持版本安全拒绝 | `_check_schema_version()` 对 `stored > SCHEMA_VERSION` 抛 `SchemaVersionError` | `test_future_version_is_rejected`、`test_future_version_is_not_silently_downgraded`、`test_future_version_rejected_before_any_write` | 成立 |
+| 4.3 低版本仅在存在迁移步骤时迁移 | `_check_schema_version()` 查 `MIGRATIONS`；`_apply_migrations()` 逐步执行 SQL 后才推进版本号，缺步骤即抛错 | `test_older_version_without_migration_is_rejected`、`test_registered_migration_upgrades_real_structure`、`test_missing_migration_step_stops_upgrade` | 成立 |
+| 4.3 不得只改版本号不迁移结构 | 版本推进发生在每步迁移 SQL **执行之后**；缺步骤直接失败 | 同上两条（用真实 `ALTER TABLE` 验证结构确实改变） | 成立 |
+| 4.4 拒绝时事务正确回滚 | `initialize_schema()` 全部逻辑位于 `Database.transaction()` 内；`SchemaVersionError` 属非 `sqlite3.Error` 异常分支 → 执行 `ROLLBACK` 后原样上抛 | `test_initialize_does_not_write_current_version`、`test_initialize_does_not_adopt_structure_when_other_tables_exist`（断言拒绝后库状态与拒绝前完全一致） | 成立 |
+
+补充说明：验证回滚的测试**复用同一个 `Database` 实例**进行检查，
+因此回滚确实由同一事务管理器完成，而非"连接关闭后自然消失"的假象。
+
+### 2.4 测试收集命令与数量
+
+```powershell
+.venv\Scripts\python.exe -m pytest --collect-only -q -p no:cacheprovider
+```
+
+| 测试文件 | 用例数 |
+|---|---:|
+| `tests/unit/test_validation.py` | 52 |
+| `tests/unit/test_self_consumption.py` | 42 |
+| `tests/unit/test_layering.py` | 16 |
+| `tests/unit/test_package_import.py` | 21 |
+| `tests/unit/test_gui_main_window.py` | 17 |
+| `tests/integration/test_database.py` | 51 |
+| `tests/integration/test_database_memory_and_schema_version.py` | 45 |
+| **合计** | **244** |
+
+- 实际收集测试文件数：**7**
+- 实际用例总数：**244**
+- 收集错误：**无**（退出码 0）
+- 与 `docs/TEST_PLAN.md` 逐项对照：分布表、5 个单元明细小节、2 个集成明细小节、
+  合计与小计**全部一致**（脚本比对结果为 True）
+
+### 2.5 完整测试的真实结果
+
+```powershell
+.venv\Scripts\python.exe -m pytest -p no:cacheprovider
+```
+
+```
+244 passed in 5.74s
+```
+
+| 指标 | 值 |
+|---|---|
+| 通过 | 244 |
+| 失败（failed） | 0 |
+| 错误（error） | 0 |
+| 跳过（skipped） | 0 |
+
+未删除任何用例，未新增跳过标记，未放宽任何断言。
+
+### 2.6 git diff --check
+
+```powershell
+git diff --check
+```
+
+无输出，退出码 **0**（无空白字符错误、无补丁格式问题）。
+
+### 2.7 CI 三项守卫的本地复现
+
+不能仅凭本地测试宣称远程 CI 通过，但也需确认守卫逻辑本身有效：
+
+| 守卫 | 本地复现结果 |
+|---|---|
+| 架构分层检查 | `tests/unit/test_layering.py` 16 个用例全部通过 |
+| 跳过用例门禁 | 按 CI 同一正则解析真实输出：`parsed passed=244`、`parsed skipped=0` → 门禁 PASS |
+| 工作树洁净检查 | `git status --porcelain` 为空 → PASS（测试未污染仓库） |
+
+### 2.8 提交与推送
+
+| 项目 | 值 |
+|---|---|
+| 本轮起点提交 | `f9edf8e572b4cc1360cd91d34cd59bfbe016e0fb`（执行前远程与本地的共同 HEAD，已核对一致） |
+| 提交信息 | `docs: 同步第一阶段验收文档版本并完成最终复核` |
+| 推送分支 | `origin/fix/stage1-review-memory-db-and-schema-version` |
+| 强制推送 | **未使用**（全程普通推送） |
+| 是否修改 `main` | **未修改** |
+
+> 本节不写入包含本文件的提交自身的 SHA（那会造成自引用且无法在写入前获知）。
+> 该提交的完整 SHA、对应的 GitHub Actions 运行链接以及 Python 3.11 / 3.14
+> 的最终状态，记录在紧随其后的 **R6** 中。
+
+### 2.9 最新 GitHub Actions
+
+本轮提交推送后触发的新运行结果见 **R6**（待该运行结束后据实记录）。
+本地已复现 CI 的三项守卫（见 2.7），但**本地通过不等于远程 CI 通过**，
+因此本节不预先声称 CI 结论。
+
+### 2.10 PR 当前状态
+
+| 项目 | 值 |
+|---|---|
+| PR | [#1](https://github.com/win8-cmd/pv/pull/1) |
+| 状态 | **open（未合并，未授权合并）** |
+| 合并前要求 | 仓库所有者复核 |
+
+### 2.11 仍未验证的项目
+
+1. **PR #1 未合并**，本轮按要求未执行合并，也未推送到 `main`。
+2. **物理显示器上的界面观感与真实鼠标点击回放**：自动化验证在 Qt `offscreen`
+   平台完成，未在真实显示器上人工确认布局。
+3. **真实电费账单数据与真实电价数据**：第一阶段明确不含，无真实样本参与测试。
+4. **多进程并发写压力测试**：未做；内存库的**多线程**并发访问亦未验证。
+5. **数据库模式迁移的真实场景**：迁移机制已用真实 `ALTER TABLE` 测试验证，
+   但 `SCHEMA_VERSION` 仍为 1、`MIGRATIONS` 为空，尚无历史版本可迁。
+6. **元数据损坏形态未穷举**：仅覆盖"缺记录""值为 NULL""空元数据表"
+   "只有元数据表"四种；未覆盖 `schema_meta` 表被改成完全不同的列结构等情况。
+7. **打包与安装程序**：未实现，仅支持源码方式安装。
+8. **代码覆盖率数值**：未采集为验收指标。
+9. **文档数量无自动化校验**：`TEST_PLAN` 与实测数量目前靠人工/脚本比对，
+   尚未固化为测试用例。
+
+### 2.12 后续建议
+
+1. 由仓库所有者复核并**授权合并** PR #1；合并后本轮文档与修复进入 `main`。
+2. （可选）把"文档数量与 `pytest --collect-only` 一致"固化为自动化测试，
+   闭合 2.11 第 9 项。
+3. （可选）演练首个真实迁移（`SCHEMA_VERSION` 提升到 2 并登记真实 `ALTER TABLE`），
+   闭合 2.11 第 5 项。
+4. 以上闭合后再评估是否进入第二阶段（电费账单导入与数据提取）。
+   **本轮未开始第二阶段。**
+
+---
+
+## 3. R4 — 元数据完整性修复与测试数量统一
 
 - 完成日期：2026-10-11
 - 任务来源：复核意见（PR #1 的两项问题）
 - 分支：`fix/stage1-review-memory-db-and-schema-version`
 - 结论：**完成**（等待复核，未合并）
 
-### 2.1 完成内容
+### 3.1 完成内容
 
 | 编号 | 问题 | 状态 | 实际做法 |
 |---|---|---|---|
 | 1 | `_read_schema_version()` 未区分"元数据表不存在"与"表存在但缺版本记录" | 完成 | 新增 `_read_schema_state()` 返回 `(表是否存在, 版本或 MISSING_VERSION)`；后者改为抛 `SchemaVersionError` |
 | 2 | `TEST_PLAN.md` 分布表与明细分节数量不一致 | 完成 | 以 `pytest --collect-only -q` 实际输出为准重写分布表与各小节数量；补齐新增文件的明细小节 |
 
-### 2.2 缺陷原因与修复
+### 3.2 缺陷原因与修复
 
 **缺陷：元数据不完整被当作新数据库**
 
@@ -61,7 +236,7 @@
   （README、PRD、ROADMAP、AI_DEVELOPMENT_GUIDE、ACCEPTANCE_CRITERIA）。
   R1/R2 小节中的 199/234 属于**历史快照**，故意保留不追溯修改。
 
-### 2.3 关键设计决策与理由
+### 3.3 关键设计决策与理由
 
 | 决策 | 理由 |
 |---|---|
@@ -72,7 +247,7 @@
 | 重写而非删除错误用例 | 该用例固化了错误语义；直接删除会丢失"这里曾有分歧"的信息，重写为对照组更有价值 |
 | R1/R2 的历史数字不追溯改写 | 结论日志的生命力在于如实；追溯改写会让"当时实测是什么"无从考证 |
 
-### 2.4 测试结果（实测）
+### 3.4 测试结果（实测）
 
 本机：Windows 11 专业版 10.0.22621 / Python 3.14.7
 
@@ -99,7 +274,7 @@
 | `test_current_version_with_missing_tables_is_repaired` | 对照组：版本有效时缺表可修复 |
 | `test_sentinel_is_distinct_from_none` | 哨兵与 `None` 可区分 |
 
-### 2.5 CI 实测
+### 3.5 CI 实测
 
 | 运行 | 触发提交 | Python 3.14 | Python 3.11 |
 |---|---|---|---|
@@ -108,7 +283,7 @@
 跳过用例门禁输出"无跳过用例，全部用例已真实执行（passed=244）"，
 架构分层检查与工作树洁净检查均通过。
 
-### 2.6 变更文件清单
+### 3.6 变更文件清单
 
 | 文件 | 变更 |
 |---|---|
@@ -120,7 +295,7 @@
 | `docs/AI_DEVELOPMENT_GUIDE.md` | 第 5 节新增"元数据完整性红线" |
 | `README.md`、`docs/PRD.md`、`docs/ROADMAP.md` | 数量同步为 244 |
 
-### 2.7 Git 状态
+### 3.7 Git 状态
 
 | 项目 | 值 |
 |---|---|
@@ -129,7 +304,7 @@
 | 强制推送 | 未使用 |
 | PR | PR #1 保持 open，**未合并**（按要求等待复核） |
 
-### 2.8 未完成事项（如实披露）
+### 3.8 未完成事项（如实披露）
 
 1. **PR #1 仍为 open**，本轮修复未合并到 main。
 2. 元数据修复属**代码评审发现的缺陷**，非运行中故障；除新增用例覆盖的场景外，
@@ -139,7 +314,7 @@
 4. 结论日志与文档数量目前靠人工同步，**无自动化校验**（可将
    `--collect-only` 结果与文档比对做成测试）。
 
-### 2.9 下一轮建议
+### 3.9 下一轮建议
 
 1. 复核本轮修复与 PR #1，合并后使日志与修复进入 main。
 2. （可选）增加"文档数量与实测一致"的自动化校验，闭合第 2.8 节第 4 项。
@@ -147,14 +322,14 @@
 
 ---
 
-## 3. R3 — 建立完成结论日志与每轮更新约定
+## 4. R3 — 建立完成结论日志与每轮更新约定
 
 - 完成日期：2026-10-11
 - 任务来源：用户要求"生成本轮已完成的结论文件同步到 GitHub，后续每次完成后执行此类操作"
 - 分支：`fix/stage1-review-memory-db-and-schema-version`
 - 结论：**完成**
 
-### 3.1 完成内容
+### 4.1 完成内容
 
 | 编号 | 要求 | 状态 | 实际做法 |
 |---|---|---|---|
@@ -162,7 +337,7 @@
 | 2 | 同步到 GitHub | 完成 | 提交并推送到 PR #1 分支；已用 GitHub API 校验文件确实可从远程取回 |
 | 3 | 后续每次完成后执行此类操作 | 完成 | 写入制度而非仅口头约定：`docs/AI_DEVELOPMENT_GUIDE.md` 完成定义新增条目并新增第 10.1 节操作步骤；`README.md` 文档索引与工作约定同步标注 |
 
-### 3.2 关键设计决策与理由
+### 4.2 关键设计决策与理由
 
 | 决策 | 理由 |
 |---|---|
@@ -173,7 +348,7 @@
 | 把约定写进 AI_DEVELOPMENT_GUIDE 的完成定义并列为完成条件 | 仅写进日志本身容易被后续开发者忽略；纳入 DoD 才有约束力 |
 | 本轮也单独记为 R3 | 轮次记录应自洽——新增约定后第一件应用它的事就是记录本轮自身 |
 
-### 3.3 测试结果（实测）
+### 4.3 测试结果（实测）
 
 本机：Windows 11 专业版 10.0.22621 / Python 3.14.7
 
@@ -185,13 +360,13 @@
 
 本轮为纯文档变更，未改动任何代码或测试，用例数与 R2 相同（234）。
 
-### 3.4 CI 实测
+### 4.4 CI 实测
 
 | 运行 | 触发提交 | 结果 |
 |---|---|---|
 | [run 38121391733](https://github.com/win8-cmd/pv/actions/runs/38121391733) | `67145e4`（新增 PROGRESS_LOG） | Python 3.14 与 3.11 均 success |
 
-### 3.5 变更文件清单
+### 4.5 变更文件清单
 
 | 文件 | 变更 |
 |---|---|
@@ -199,7 +374,7 @@
 | `docs/AI_DEVELOPMENT_GUIDE.md` | 完成定义新增条目；新增第 10.1 节每轮更新步骤与命令 |
 | `README.md` | 文档索引加入 PROGRESS_LOG；标注每轮更新约定 |
 
-### 3.6 Git 状态
+### 4.6 Git 状态
 
 | 项目 | 值 |
 |---|---|
@@ -207,7 +382,7 @@
 | 推送状态 | 已推送至 `origin/fix/stage1-review-memory-db-and-schema-version` |
 | 强制推送 | 未使用 |
 
-### 3.7 未完成事项（如实披露）
+### 4.7 未完成事项（如实披露）
 
 1. **R3 与 PR #1 的其余变更尚未合并到 main**：PR #1 仍为 open；因此
    `docs/PROGRESS_LOG.md` 目前只存在于 PR 分支，合并后才出现在 main。
@@ -215,7 +390,7 @@
    或校验记录中的用例数与 `pytest --collect-only` 实际数量一致）。
 3. 其余未验证事项继承 R2 第 3.8 节，本轮未涉及。
 
-### 3.8 下一轮建议
+### 4.8 下一轮建议
 
 1. 审阅并合并 PR #1，使结论日志进入 main。
 2. （可选）为 PROGRESS_LOG 增加一致性校验测试，闭合第 2.7 节第 2 项。
@@ -223,7 +398,7 @@
 
 ---
 
-## 4. R2 — 第一阶段代码复核与缺陷修复
+## 5. R2 — 第一阶段代码复核与缺陷修复
 
 - 完成日期：2026-10-11
 - 任务来源：第一阶段代码复核与缺陷修复任务书
@@ -231,7 +406,7 @@
 - Pull Request：[PR #1](https://github.com/win8-cmd/pv/pull/1)（open，mergeable: clean）
 - 结论：**通过**（复核新增验收项 A14–A16 全部通过；等待审阅合并）
 
-### 4.1 完成内容
+### 5.1 完成内容
 
 | 编号 | 任务书要求 | 状态 | 实际做法与证据 |
 |---|---|---|---|
@@ -243,7 +418,7 @@
 | 6 | Git 要求 | 完成 | 开发前工作树干净；提交到独立分支并创建 PR；**全程未使用强制推送** |
 | 7 | 最终交付 | 完成 | 本轮报告已提交给用户；本文件为持久化结论 |
 
-### 4.2 缺陷原因与修复
+### 5.2 缺陷原因与修复
 
 **缺陷 1：内存数据库跨事务失效**
 
@@ -266,7 +441,7 @@
 | 低于且有迁移步骤 | 按阶梯执行迁移 SQL，每步后推进版本号 |
 | 低于且无迁移步骤 | 抛 `SchemaVersionError`，拒绝自动升级 |
 
-### 4.3 关键设计决策与理由
+### 5.3 关键设计决策与理由
 
 | 决策 | 理由 |
 |---|---|
@@ -277,7 +452,7 @@
 | 新增 `SchemaVersionError` 而非复用 `PersistenceError` | 调用方可精确区分"版本不兼容"与一般持久化故障；同时继承 `PersistenceError` 保持兼容 |
 | CI 增加独立的"跳过用例门禁" | 任务书明确禁止以跳过测试获得绿色结果；仅靠"没有失败"无法证明没有跳过 |
 
-### 4.4 测试结果（实测）
+### 5.4 测试结果（实测）
 
 本机环境：Windows 11 专业版 10.0.22621 / Python 3.14.7 / Git 2.55.0.windows.4
 依赖版本：PySide6 6.12.0、pandas 3.0.6、openpyxl 3.1.5、pytest 9.1.1、numpy 2.5.4
@@ -307,7 +482,7 @@
 
 无回归：原有用例 199 个全部通过，新增 35 个。
 
-### 4.5 CI 实测（GitHub Actions，非本地推定）
+### 5.5 CI 实测（GitHub Actions，非本地推定）
 
 | 运行 | 触发提交 | Python 3.14 | Python 3.11 |
 |---|---|---|---|
@@ -326,7 +501,7 @@
 
 该项结果同时消除了"Python 3.11 兼容性未验证"这一限制。
 
-### 4.6 变更文件清单
+### 5.6 变更文件清单
 
 相对 `main`：13 个文件，+1064 / −85
 
@@ -347,7 +522,7 @@
 | `docs/ROADMAP.md` | +4/−4 |
 | `docs/PROGRESS_LOG.md` | 新增（本文件） |
 
-### 4.7 Git 状态
+### 5.7 Git 状态
 
 | 项目 | 值 |
 |---|---|
@@ -359,7 +534,7 @@
 | 强制推送 | **未使用** |
 | 敏感文件 | 未提交数据库、账单、密钥、缓存 |
 
-### 4.8 未完成事项（如实披露）
+### 5.8 未完成事项（如实披露）
 
 1. **CI 与代码变更尚未合并到 main**：PR #1 仍为 open，等待审阅。
 2. **内存库多线程并发访问**未验证（仅单实例单线程）。
@@ -370,7 +545,7 @@
 7. **打包与安装程序**未实现。
 8. **覆盖率数值**未采集为验收指标。
 
-### 4.9 下一轮建议
+### 5.9 下一轮建议
 
 1. 审阅并合并 PR #1。
 2. （可选）演练首个真实迁移：把 `SCHEMA_VERSION` 提升到 2 并登记一条真实 `ALTER TABLE`，验证迁移路径在真实场景下可用。
@@ -379,14 +554,14 @@
 
 ---
 
-## 5. R1 — 第一阶段工程骨架与核心规则冻结
+## 6. R1 — 第一阶段工程骨架与核心规则冻结
 
 - 完成日期：2026-10-11
 - 任务来源：第一阶段工程骨架与核心规则冻结任务书
 - 分支：`main`
 - 结论：**通过**（13 项验收项全部通过）
 
-### 5.1 完成内容
+### 6.1 完成内容
 
 在空仓库（`git ls-remote` 无任何 ref、`No commits yet on main`）基础上从零建立：
 
@@ -402,7 +577,7 @@
 | 文档 | 8 份：PRD、ARCHITECTURE、DATA_MODEL、CALCULATION_SPEC、ROADMAP、TEST_PLAN、ACCEPTANCE_CRITERIA、AI_DEVELOPMENT_GUIDE |
 | 测试 | 199 个用例，含架构分层 AST 守卫与 Qt `offscreen` 界面测试 |
 
-### 5.2 核心计算结果（标准验收案例）
+### 6.2 核心计算结果（标准验收案例）
 
 输入 `load = [3, 8, 2]`、`pv = [5, 4, 2]`（kWh）：
 
@@ -419,7 +594,7 @@
 
 数值与任务书表格逐项一致；能量守恒自检通过。
 
-### 5.3 测试结果（实测）
+### 6.3 测试结果（实测）
 
 | 命令 | 结果 |
 |---|---|
@@ -430,7 +605,7 @@
 
 界面启动实测输出：`GUI_VISIBLE=True`、`GUI_EXIT_CODE=0`、界面计算结果含 `9.000000` 等验收数值。
 
-### 5.4 Git 状态
+### 6.4 Git 状态
 
 | 项目 | 值 |
 |---|---|
@@ -440,22 +615,22 @@
 | 推送状态 | 已推送至 `origin/main`（`0 0` 同步） |
 | 强制推送 | 使用过一次（经仓库所有者明确授权），用于把占位作者 `CENEP Developer` 修正为真实身份；改写前后树对象哈希逐一比对，**内容完全一致** |
 
-### 5.5 本轮的自我纠正记录（留痕）
+### 6.5 本轮的自我纠正记录（留痕）
 
 开发过程中由真实执行发现并修复的问题：Qt `setData` 把 `str` 枚举降级为普通字符串；异常文本泄漏枚举类名（`[Severity.ERROR]`）；`SelfConsumptionResult` docstring 声称负荷覆盖率"可以大于 1"（与公式矛盾的文档缺陷）；`pyproject.toml` 声明 `readme = "README.md"` 而该文件当时不存在；工作区 Windows 文件权限故障阻塞沙箱写入（已按权限诊断流程修复）。
 
-### 5.6 未完成事项（R1 结束时）
+### 6.6 未完成事项（R1 结束时）
 
 真实显示器界面观感、鼠标点击回放、真实账单与电价数据、多文件库并发写、迁移框架、打包安装程序、覆盖率数值。
 
-### 5.7 下一轮建议（R1 结束时）
+### 6.7 下一轮建议（R1 结束时）
 
 进入第二阶段账单导入与数据提取。实际下一轮执行的是**代码复核与缺陷修复（R2）**，
 即任务书要求的先复核、再推进下一阶段。
 
 ---
 
-## 6. 本文件的维护规则（后续每轮必读）
+## 7. 本文件的维护规则（后续每轮必读）
 
 每一轮完成后，按以下步骤操作，**不要跳过第 3、5 步**：
 

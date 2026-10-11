@@ -1,6 +1,6 @@
 # CENEP 测试计划（TEST PLAN）
 
-- 文档版本：`2026.10-stage1-r3`
+- 文档版本：`2026.10-stage1-r4`
 - 软件版本：`0.1.0`
 - 对应测试目录：`tests/`
 - 当前基线：**244 个用例，全部通过**（实测结果见 `docs/ACCEPTANCE_CRITERIA.md`）
