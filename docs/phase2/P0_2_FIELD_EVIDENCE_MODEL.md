@@ -85,6 +85,8 @@ class FieldEvidence:
 **硬性要求**：
 
 - `source_text` 必须是**原文**，不得规范化（不删空格、不合并行）。
+- `source_text` 必须是**最小原文片段**（不是整页）：以标签与数值为锚点截取，
+  并按需跨行保留被换行切开的数值与单位。**必须**是原始页文本的连续子串。
   规范化只发生在匹配阶段，证据保留原始形态。
 - 一条字段可以有**多条证据**（同一字段在账单多处出现）。
 - 证据只增不改：人工修正**不得**覆盖或删除原始证据。
@@ -180,16 +182,55 @@ class BillFieldSet:
 **与 P0-1 的强关联（防止把部分提取当成完整账单）**：
 
 ```python
-@property
-def is_usable_for_calculation(self) -> bool:
-    """是否可用于正式测算。"""
-    return (
-        self.extraction_status is PdfExtractionStatus.SUCCESS   # 必须完整提取
-        and all(f.status is FieldStatus.PARSED and not f.requires_manual_confirmation
-                for f in self.fields.values())
-        and (self.reconciliation is None or self.reconciliation.is_within_tolerance)
-    )
+class ConfirmationStatus(str, Enum):
+    PENDING = "pending"      # 解析完成，等待人工复核
+    CONFIRMED = "confirmed"  # 已人工确认
+    REJECTED = "rejected"    # 人工复核后驳回
+
+@dataclass(frozen=True)
+class BillConfirmation:
+    status: ConfirmationStatus = ConfirmationStatus.PENDING
+    confirmed_by: str | None = None
+    confirmed_at: datetime | None = None
+    note: str | None = None
+    # confirmed 时必须有确认人与确认时间；pending 时不得携带二者
+
+@dataclass(frozen=True)
+class BillFieldSet:
+    ...
+    confirmation: BillConfirmation = PENDING_CONFIRMATION
+
+    @property
+    def is_parsed_and_ready_for_review(self) -> bool:
+        """解析是否完成、结果是否可供复核（**不等于可进入测算**）。"""
+        return (
+            self.extraction_status is PdfExtractionStatus.SUCCESS   # 必须完整提取
+            and self.all_required_fields_parsed
+            and not self.fields_requiring_review
+            and not self.has_reconciliation_mismatch
+        )
+
+    @property
+    def is_usable_for_calculation(self) -> bool:
+        """是否可用于**正式经济性测算**——必须同时满足"可复核"与"已确认"。"""
+        return self.is_parsed_and_ready_for_review and self.is_confirmed
 ```
+
+**三个阶段必须显式区分**（禁止两段式判断）：
+
+| 阶段 | 判据 | 允许做什么 |
+|---|---|---|
+| 解析完成、可供复核 | `is_parsed_and_ready_for_review` | 展示字段与证据、供人工核对 |
+| 存在缺失/冲突/勾稽异常 | `blocking_reasons` 非空 | 必须人工复核，**不得**进入测算 |
+| 已由用户确认 | `confirmation.status is CONFIRMED` | 才可能进入正式测算 |
+
+**硬性闸门**：`is_usable_for_calculation` **必须**包含"已确认"这一条。
+缺少它，调用方就会仅凭解析成功进入正式测算——这正是本设计要禁止的行为。
+未确认时该属性恒为 `False`。
+
+**确认不能绕过复核**：`confirm()` 在存在阻塞问题（提取不完整、必需字段缺失、
+字段冲突、勾稽超差）时**拒绝确认并抛 `ValueError`**；确认人不得为空白。
+`reject()` 用于人工判定不可用。
 
 若 `extraction_status` 不是 `SUCCESS`（例如 `partial` / `needs_ocr` / `failed`），
 则**无论字段识别得多完整**，都不得判定为可用于测算——
@@ -314,18 +355,39 @@ class ReconciliationResult:
 
 ```text
 extraction_status != SUCCESS
-    → 整体不可用于测算（无论字段多完整）
+    → 不可用于测算（无论字段多完整）
 
 extraction_status == SUCCESS
-    ├── 任一必需字段 status != parsed        → 需人工复核
-    ├── 任一必需字段 requires_manual_confirmation → 需人工复核
-    ├── 勾稽存在且超差                        → 需人工复核（告警）
-    └── 以上皆否                              → 可取用（仍需用户最终确认）
+    ├── 任一必需字段 status != parsed             → 需人工复核，不可测算
+    ├── 任一必需字段 requires_manual_confirmation → 需人工复核，不可测算
+    ├── 勾稽存在且超差                             → 需人工复核（告警），不可测算
+    └── 以上皆否 → is_parsed_and_ready_for_review = True（**仍不可测算**）
+                     │
+                     └── confirmation.status is CONFIRMED ?
+                             ├── 否（pending） → 不可测算（不得跳过确认）
+                             ├── 否（rejected）→ 不可测算
+                             └── 是            → is_usable_for_calculation = True
 ```
+
+**一句话总结**：`is_usable_for_calculation`
+= `is_parsed_and_ready_for_review` **且** `is_confirmed`。
 
 必需字段（本轮首批）：`billing_period_start`、`billing_period_end`、
 `total_consumption`、`bill_total_amount`、`vat_invoice_amount`、
 `displayed_average_price`、`industrial_commercial_fee`。
+
+### 7.1 证据的最小化要求
+
+`FieldEvidence.source_text` **必须是"最小原文片段"**，而非整页文本：
+
+- 片段以**标签 + 数值**为锚点，向两侧各取少量上下文；
+- 起点不跨行，终点默认收到本行行尾；
+- **但**当数值与单位被换行切开时（``…为-9206.37`` ⏎ ``元，…``），
+  片段必须吞掉换行并把单位纳入，以保留可追溯性；
+- 小数位被换行切开时（``1787644.`` ⏎ ``3``）片段同样必须完整覆盖该数值；
+- 证据必须来自**原文**：匹配可用规范化副本，
+  但证据要按位置映射回原文截取，**不得**把规范化文本冒充原文；
+- 证据必须是原始页文本的**连续子串**（实现上有测试逐字符校验）。
 
 **可追溯性要求**：结果对象必须能回答"该值来自哪一页、哪段原文、哪条规则、
 哪一版规则"，缺一不可（任务书 5.3）。

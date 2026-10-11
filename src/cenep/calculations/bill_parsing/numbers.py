@@ -46,14 +46,16 @@ DATE_PATTERN = re.compile(r"(\d{4})-(\d{1,2})-(\d{1,2})")
 #: （实测踩坑：平均电价被解析为 0）。
 #: ``(?<!\d)`` 只防止数字中间截断，不排除前导 ``.``，
 #: 因此句末句号（``1202916.``）不会被吃进来。
+#:
+#: **允许小数点与小数位之间夹行内空白**：真实账单会出现
+#: ``1787644.`` ⏎ ``3``、``339059.`` ⏎ ``33`` 这类"小数位被换行切开"的形态。
+#: 直接在模式里跨过去，**不修改文本**，从而保住"匹配位置 → 原文位置"的一一映射。
 AMOUNT_PATTERN = re.compile(
     r"""
     (?<!\d)
     (?:
-        \d{1,3}(?:,\d{3})+\.\d+     # 1,234,567.89
-      | \d+\.\d+                    # 1234.56
-      | \d{1,3}(?:,\d{3})+          # 1,234,567
-      | \d+                         # 1234
+        \d+(?:,\d{3})*[ \t\u3000]*\.[ \t\u3000]*\n?[ \t\u3000]*\d+   # 1234.56 / 1,234,567.89
+      | \d+(?:,\d{3})*                                             # 1234 / 1,234,567
     )
     """,
     re.VERBOSE,
@@ -91,7 +93,6 @@ MULTIPLIERS: dict[str, Decimal] = {
 #: 否则相邻字段会被合并到同一"行"，逐行取数的前提就被破坏
 #: （实测踩坑：``本期电量\n8780498千瓦时\n电量明细`` 被并成一行，
 #: 导致 8780498 的窗口里混入计量点数值）。
-_CJK_INLINE_SPACE = re.compile(r"(?<=[\u3000-\u9fff])[ \t\u3000]+(?=[\u3000-\u9fff])")
 
 
 @dataclass(frozen=True)
@@ -141,8 +142,161 @@ def normalize_for_matching(text: str) -> str:
     只用于标签匹配；证据仍保存原文。
 
     **保留换行**：换行是字段之间的分隔，合并行会破坏逐行取数。
+
+    实现委托给 :func:`build_index_map`，保证"规范化文本"与
+    "位置映射"永远来自**同一套规则**，不会各自演化导致错位。
     """
-    return _CJK_INLINE_SPACE.sub("", text)
+    normalized, _ = build_index_map(text)
+    return normalized
+
+
+#: 规范化时被视为"汉字侧"的字符：**只含中日韩表意文字**。
+#: 注意**不含**全角标点（``：``、``、`` 等）——若把标点也算作汉字侧，
+#: ``户号： 用电类别`` 这类"标点+空格+汉字"会被误删空格，
+#: 导致 :func:`build_index_map` 与 :func:`normalize_for_matching` 结果不一致。
+_IDEOGRAPH = re.compile(r"[\u3000-\u9fff]")
+
+
+def build_index_map(
+    original: str,
+    *,
+    wrap_fixes: Mapping[str, str] | None = None,
+) -> tuple[str, list[int]]:
+    """生成匹配文本，并给出"匹配文本下标 → 原文下标"的映射。
+
+    这是**证据必须来自原文**的关键工具：匹配在规范化/修复后的副本上进行，
+    但证据片段要用原文，因此需要把匹配位置映射回原文。
+
+    处理分两步（顺序固定）：
+
+    1. **标签修复**（``wrap_fixes``）：把被换行切开的标签拼回整串
+       （如 ``其中增值税专用发票金\\n额``）。该步骤会删除字符，
+       因此位置映射必须同步跟踪。
+    2. **行内空格删除**：只删"汉字之间"的空格（不含换行、不含标点相邻的空格），
+       与 :func:`normalize_for_matching` 完全一致。
+
+    Args:
+        original: 原始页文本。
+        wrap_fixes: ``{被切开的形态: 拼接后的形态}``；可选。
+
+    Returns:
+        ``(匹配文本, 映射表)``。``映射表[i]`` 是匹配文本第 ``i`` 个字符
+        在原文中的下标；映射单调不减。
+    """
+    # --- 步骤 1：标签修复，同时跟踪原文位置 -------------------------------
+    staged_chars: list[str] = []
+    staged_positions: list[int] = []
+    index = 0
+    length = len(original)
+    fixes = tuple((wrap_fixes or {}).items())
+    while index < length:
+        matched = False
+        for broken, whole in fixes:
+            if broken and original.startswith(broken, index):
+                span = len(broken) - 1
+                for offset, char in enumerate(whole):
+                    staged_chars.append(char)
+                    staged_positions.append(min(index + min(offset, span), length - 1))
+                index += len(broken)
+                matched = True
+                break
+        if matched:
+            continue
+        staged_chars.append(original[index])
+        staged_positions.append(index)
+        index += 1
+
+    # --- 步骤 2：删除汉字之间的行内空格 -----------------------------------
+    parts: list[str] = []
+    mapping: list[int] = []
+    staged_length = len(staged_chars)
+    for position, char in enumerate(staged_chars):
+        if char in " \t\u3000":
+            previous = staged_chars[position - 1] if position > 0 else ""
+            following = staged_chars[position + 1] if position + 1 < staged_length else ""
+            if _IDEOGRAPH.match(previous) and _IDEOGRAPH.match(following):
+                continue
+        parts.append(char)
+        mapping.append(staged_positions[position])
+    return "".join(parts), mapping
+    return "".join(parts), mapping
+
+
+def minimal_evidence_span(
+    normalized: str,
+    start: int,
+    end: int,
+    *,
+    context: int = 16,
+) -> tuple[int, int]:
+    """在**规范化文本**上求出一个"最小证据片段"的范围。
+
+    片段以标签与数值为锚点，向两侧各取少量上下文，并在**换行处收敛**：
+
+    - 起点回退到上一行行首（不跨行，避免带入无关内容）；
+    - 终点默认收到本行行尾；
+    - 若数值之后紧接着换行且换行后是**单位**，则吞掉该换行与单位，
+      以保留"数值与单位被换行切开"的关键信息。
+
+    Returns:
+        ``(片段起点, 片段终点)``，均为规范化文本下标。
+    """
+    length = len(normalized)
+    begin = max(0, start - context)
+    # 起点不跨行：回退到本行行首
+    line_start = normalized.rfind("\n", 0, start)
+    if line_start >= 0:
+        begin = max(begin, line_start + 1)
+
+    finish = min(length, end + 6)
+    # 终点不跨多行：默认收到本行行尾
+    line_end = normalized.find("\n", end)
+    if line_end >= 0:
+        finish = min(finish, line_end)
+    # 若"数值"之后紧接着换行，且换行后是单位，则把该换行与单位纳入片段
+    tail_after_line = normalized[line_end + 1 : line_end + 9] if line_end >= 0 else ""
+    if tail_after_line and _starts_with_unit(tail_after_line):
+        unit_end = line_end + 1 + len(_leading_unit(tail_after_line))
+        finish = max(finish, unit_end)
+    return begin, finish
+
+
+def _leading_unit(text: str) -> str:
+    """返回文本开头的单位（若有）。"""
+    stripped = text.lstrip()
+    offset = len(text) - len(stripped)
+    for unit in _KNOWN_UNITS:
+        if stripped.startswith(unit):
+            return " " * offset + unit
+    return ""
+
+
+def _starts_with_unit(text: str) -> bool:
+    return bool(_leading_unit(text))
+
+
+def span_to_original(
+    span: tuple[int, int],
+    mapping: list[int],
+    original: str,
+) -> str:
+    """把规范化文本上的片段范围映射回原文，返回原文片段。
+
+    映射表长度为 0（空文本）时返回空串。
+    """
+    if not mapping:
+        return ""
+    begin, end = span
+    begin = max(0, min(begin, len(mapping) - 1))
+    if end <= begin:
+        return ""
+    last = min(end, len(mapping)) - 1
+    original_begin = mapping[begin]
+    original_end = mapping[last] + 1
+    # 向后吞掉与末字符同属"单位/换行"的原文空白，让片段读起来自然
+    while original_end < len(original) and original[original_end] in " \t":
+        original_end += 1
+    return original[original_begin:original_end]
 
 
 def label_value_lines(
@@ -304,7 +458,12 @@ def scan_amounts(segment: str) -> list[AmountMatch]:
     for match in AMOUNT_PATTERN.finditer(segment):
         literal = match.group(0)
         start, end = match.start(), match.end()
-        if _is_parameter_construct(segment, start, end):
+        # 字面量可能含行内空白（小数位被换行切开的形态）；
+        # 校验单位/符号时要用**非空白字符的末尾位置**。
+        token_end = end
+        while token_end > start and segment[token_end - 1] in " \t\u3000":
+            token_end -= 1
+        if _is_parameter_construct(segment, start, token_end):
             continue
 
         prefix_raw = segment[max(0, start - 12) : start]
@@ -313,7 +472,7 @@ def scan_amounts(segment: str) -> list[AmountMatch]:
         # 实测踩坑：备注段落以"5."开头，被当成金额 5 混入候选。
         # 判定：位于行首，且数值后面紧跟"点号 + 非数字"（真小数会继续跟数字）。
         if start == 0:
-            remainder = segment[end:]
+            remainder = segment[token_end:]
             if remainder.startswith(".") and not remainder[1:2].isdigit():
                 continue
 
@@ -326,12 +485,12 @@ def scan_amounts(segment: str) -> list[AmountMatch]:
         #   - 字面量是不含小数点与千分位的短整数。
         # 真实金额如 ``(9,206.37)`` 含小数/逗号，因此不会被误伤。
         prefix_stripped = prefix_raw.rstrip()
-        suffix_raw = segment[end : end + 3]
+        suffix_raw = segment[token_end : token_end + 3]
         enclosed = prefix_stripped.endswith(("(", "（")) and suffix_raw.lstrip().startswith((")", "）"))
         if enclosed and "." not in literal and "," not in literal and len(literal) <= 3:
             continue
 
-        unit = _unit_after(segment, end)
+        unit = _unit_after(segment, token_end)
         if unit is None and start > 0 and segment[start - 1] == "￥":
             # 账单"合计"行使用前缀货币符号：￥6699241.94
             unit = "￥"
@@ -339,7 +498,7 @@ def scan_amounts(segment: str) -> list[AmountMatch]:
         # 符号：前导 '-'，或中文括号/半角括号包裹
         prefix = segment[max(0, start - 10) : start]
         is_negative = bool(re.search(r"-\s*$", prefix))
-        suffix = segment[end : end + 3]
+        suffix = segment[token_end : token_end + 3]
         # 括号负数的严格判定：左括号必须**独立**（行首或前面是空白/分隔符）。
         # 否则会把公式里的编号误判为负数
         # （实测踩坑：``(5)政府基金及附加`` 被解析成 -5）。
@@ -379,12 +538,21 @@ def scan_amounts(segment: str) -> list[AmountMatch]:
 def parse_amount(literal: str) -> Decimal | None:
     """把金额/电量字面量转为 ``Decimal``（不含单位换算与符号）。
 
+    容错：
+
+    - 千分位 ``1,234.56``；
+    - **字面量内部夹有空白/换行**（``1787644.\\n3``，小数位被换行切开）；
+    - 句末句号（``1202916.``）——去掉尾点后按整数解析。
+
     Returns:
         ``Decimal``；无法解析时返回 ``None``（**不返回 0**）。
     """
-    if not isinstance(literal, str) or not literal.strip():
+    if not isinstance(literal, str):
         return None
-    cleaned = literal.strip().replace(",", "")
+    # 去掉内部所有空白（含换行）：这是"小数位被换行切开"形态的关键
+    cleaned = re.sub(r"[\s\u3000]", "", literal).replace(",", "")
+    if cleaned.endswith("."):
+        cleaned = cleaned[:-1]
     if not cleaned:
         return None
     try:

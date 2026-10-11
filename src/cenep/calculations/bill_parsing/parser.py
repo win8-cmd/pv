@@ -23,18 +23,20 @@
 from __future__ import annotations
 
 from datetime import date
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Sequence
 
 from cenep.calculations.bill_parsing.numbers import (
     AMOUNT_PATTERN,
     KWH_UNITS,
+    build_index_map,
+    minimal_evidence_span,
+    span_to_original,
     PRICE_UNITS,
     UNKNOWN_UNIT,
     YEN_UNITS,
     AmountMatch,
-    join_wrapped_numbers,
-    label_value_lines,
     normalize_for_matching,
     scan_amounts,
 )
@@ -84,11 +86,14 @@ _AMOUNT_FIELDS = frozenset(
 #: 电量与单价单位集合同理来自 numbers 模块，避免两处定义不一致。
 
 #: 标签字面量中可能被换行切开的形态（真实账单出现过）
-_LABEL_WRAP_FIXES: tuple[tuple[str, str], ...] = (
-    ("其中增值税专用发票金\n额", "其中增值税专用发票金额"),
-    ("增值税专用发票金\n额", "增值税专用发票金额"),
-    ("本期您的平均电\n价", "本期您的平均电价"),
-)
+#: 标签被换行切开的形态 → 拼接后的整串。
+#: 供 :func:`build_index_map` 的 ``wrap_fixes`` 使用；该函数会同步维护
+#: "匹配文本位置 → 原文位置"的映射，因此修复后证据仍取原文。
+_LABEL_WRAP_FIXES: dict[str, str] = {
+    "其中增值税专用发票金\n额": "其中增值税专用发票金额",
+    "增值税专用发票金\n额": "增值税专用发票金额",
+    "本期您的平均电\n价": "本期您的平均电价",
+}
 
 
 class _Rule:
@@ -151,15 +156,83 @@ class _Candidate:
         self.unit = unit
 
 
-def _prepare_pages(pages: Sequence[str]) -> list[str]:
-    """形态修复（仅用于匹配；证据仍保存原文）。"""
-    prepared: list[str] = []
-    for text in pages:
-        fixed = join_wrapped_numbers(text)
-        for broken, whole in _LABEL_WRAP_FIXES:
-            fixed = fixed.replace(broken, whole)
-        prepared.append(fixed)
-    return prepared
+@dataclass(frozen=True)
+class _PageView:
+    """一页的两种视图：用于匹配的文本 + 用于证据的原文与位置映射。
+
+    **为什么必须并存**：匹配需要删掉汉字之间的空格才可靠，
+    但证据必须是**原文**（任务书要求：不得把规范化文本冒充原文）。
+    ``mapping[i]`` 给出匹配文本下标 ``i`` 对应的原文下标。
+    """
+
+    page_number: int
+    original: str
+    matched: str
+    mapping: tuple[int, ...]
+
+    def evidence_snippet(self, span: tuple[int, int]) -> str:
+        """把匹配文本上的片段范围映射回原文，返回原文片段。"""
+        return span_to_original(span, list(self.mapping), self.original)
+
+    def line_spans(self, start: int, size: int, *, max_skip: int = 1, is_value_line=None):
+        """从 ``start`` 起按行收集"数值块"，返回 ``[(行文本, 绝对起点, 序号)]``。
+
+        收集规则与 :func:`cenep.calculations.bill_parsing.numbers.label_value_lines`
+        一致（含"跳过若干说明行"和"命中数值即停止"），
+        但额外给出每行在匹配文本中的**绝对起点**，以便把匹配位置映射回原文。
+        """
+        text = self.matched
+        length = len(text)
+        index = start
+        while index < length and text[index] in " \t\r\n":
+            index += 1
+
+        predicate = is_value_line or (lambda line: any(ch.isdigit() for ch in line))
+        results: list[tuple[str, int, int]] = []
+        skipped = 0
+        ordinal = 0
+        while index < length and skipped <= max_skip:
+            limit = min(length, index + size)
+            line_end = text.find("\n", index, limit)
+            if line_end < 0:
+                results.append((text[index:limit], index, ordinal))
+                break
+            line = text[index:line_end]
+            if predicate(line):
+                results.append((line, index, ordinal))
+                # 行尾是小数点 → 小数位被换行切开（``1787644.`` ⏎ ``3``），
+                # 必须继续往后取，让"跨行数值模式"把它整体匹配，
+                # 否则会被当成"整数 1787644"而在小数点处截断。
+                if line.rstrip().endswith("."):
+                    skipped += 1
+                    ordinal += 1
+                    index = line_end + 1
+                    while index < length and text[index] in " \t\r\n":
+                        index += 1
+                    continue
+                break
+            skipped += 1
+            ordinal += 1
+            index = line_end + 1
+            while index < length and text[index] in " \t\r\n":
+                index += 1
+        return results
+
+
+def _build_page_views(pages: Sequence[str]) -> list[_PageView]:
+    """把每页原文转成 :class:`_PageView`（匹配文本 + 位置映射）。"""
+    views: list[_PageView] = []
+    for index, original in enumerate(pages, start=1):
+        matched, mapping = build_index_map(original, wrap_fixes=_LABEL_WRAP_FIXES)
+        views.append(
+            _PageView(
+                page_number=index,
+                original=original,
+                matched=matched,
+                mapping=tuple(mapping),
+            )
+        )
+    return views
 
 
 def _locate_labels(text: str, labels: Sequence[str]) -> list[tuple[int, str]]:
@@ -268,86 +341,46 @@ def _is_explanatory_line(line: str) -> bool:
 #: 行尾这些字符表示"数值可能还被切断"，需要借下一行补全（通常是单位）
 _LOOKAHEAD_TAIL = ("为", "是", "计", "＝", "=")
 
-
-def _needs_unit_lookahead(line: str) -> bool:
-    """判断行尾的数值是否需要在下一行寻找单位。
-
-    真实账单会把数值与单位切到两行::
-
-        剩余优先发电价差损益 86926.94 本期您的实际功率因数调整电费为-9206.37
-        元，较上期增长38385.73元。
-
-    此时必须借下一行才能拿到 ``元``。
-
-    但**不能无条件拼接**：像 ``(5)政府性基金及附加 396878.51`` 这样的完整行，
-    若与下一行拼接会把下一行的数字接到小数位后面
-    （实测踩坑：``396878.51`` + ``49`` → ``396878.5149``）。
-    """
-    stripped = line.rstrip()
-    if not stripped:
-        return False
-    if stripped.endswith("."):
-        return True
-    if stripped[-1].isdigit() and stripped[-2:-1] == ".":
-        return True
-    return stripped.endswith(_LOOKAHEAD_TAIL)
-
-
-def _scan_label_lines(
-    lines: Sequence[str],
+def _select_line_candidate(
+    line: str,
+    line_start: int,
+    matches: Sequence[AmountMatch],
     expects: str | None,
-) -> tuple[list[AmountMatch], int, str]:
-    """在标签之后的**逐行**数值区中挑选候选。
+) -> tuple[AmountMatch | None, int]:
+    """从某行的全部数值中选出属于本字段的一个候选。
 
-    逐行处理可避免跨行污染（实测踩坑：``本期电量`` 借用了下一行的 ``元`` 单位）。
+    返回 ``(选中的候选或 None, 被排除的数量)``。
 
-    **相邻行拼接**：真实账单会把一个数值与它的单位切到两行，
-    例如 ``...为-9206.37`` ⏎ ``元，较上期增长...``。
-    因此把当前行与下一行拼接后再扫描，使单位能正确归属。
+    规则与 :func:`_select_candidates` 相同，但额外要求候选的**证据片段包含该数值**：
+    真实账单里"标签名"也会出现在引用型文字中（如文号 ``[2023]163号``），
+    这类数值不应算作候选（实测踩坑）。
 
-    Returns:
-        ``(选中候选, 被排除数量, 命中的行文本)``
+    Args:
+        line: 该行的匹配文本。
+        line_start: 该行在整页匹配文本中的绝对起点。
+        matches: 该行扫描出的全部数值（其下标相对 ``line``）。
+        expects: 期望单位类别。
     """
-    rejected_total = 0
-    for index, line in enumerate(lines):
-        if not line.strip():
-            continue
-        if _is_formula_line(line) or _is_explanatory_line(line):
-            # 口径说明/引用行不是数据行
-            continue
-        # 仅在行尾数值可能被切断时，才借下一行补全单位
-        if index + 1 < len(lines) and _needs_unit_lookahead(line):
-            joined = line + lines[index + 1]
-        else:
-            joined = line
-        matches = scan_amounts(joined)
-        if not matches:
-            continue
-        # 计量点明细行不做候选（R8）
-        if "正向有功" in line or "正向无功" in line:
-            continue
-        selected, rejected = _select_candidates(matches, expects)
-        rejected_total += rejected
-        if selected:
-            # 一行里同一量纲出现多个数值时，取**第一个**作为本窗口的值，
-            # 其余计入排除数。否则同一行后面的无关数值（如紧随其后的单价）
-            # 会被当成第二个候选，造成假冲突（实测踩坑：需量电费行后面
-            # 紧跟"本期您的平均电价0.76297元/千瓦时"）。
-            rejected_total += len(selected) - 1
-            return selected[:1], rejected_total, line
-    return [], rejected_total, ""
+    del line_start  # 目前仅用于文档说明；位置由调用方结合 match.start 计算
+    selected, rejected = _select_candidates(matches, expects)
+    if not selected:
+        return None, rejected
+    # 一行内同量纲多个数值时取第一个，其余计入排除
+    rejected += len(selected) - 1
+    return selected[0], rejected
 
 
-def _collect_candidates(pages: Sequence[str], rule: _Rule) -> tuple[list[_Candidate], int]:
-    """收集候选值。
+def _collect_candidates(
+    views: Sequence[_PageView], rule: _Rule
+) -> tuple[list[_Candidate], int]:
+    """收集候选值（匹配在 ``view.matched`` 上，证据取原文片段）。
 
-    标签变体按规则中的顺序**优先级**处理：某页命中第一个**能取到数值**的变体后，
-    该页不再尝试其余变体。否则更宽松的短标签会把无关数值拉进来
-    （实测踩坑：``需（容）量电费为`` 与 ``需量电费`` 同时命中，
-    短标签从后面的"合计"行取到了错误数值，造成假冲突）。
+    标签变体按规则顺序**优先级**处理：某页命中第一个**能取到数值**的变体后，
+    该页不再尝试其余变体，也不再扫描后续页（后续页多为计量点/分时明细，
+    口径与首页汇总不同）。
 
-    注意：同一页内**同一标签出现多次**仍会全部收集，
-    这是"真冲突"的来源（如账单在摘要与明细两处给出不同的电量）。
+    同一标签在同一页的多次出现都会检查（这是"真冲突"的来源），
+    但**按数值去重**——账单会把同一数值以不同措辞复述，那属于同一条数据。
 
     Returns:
         ``(候选列表, 因单位不符/单位不明被排除的数量)``。
@@ -355,48 +388,70 @@ def _collect_candidates(pages: Sequence[str], rule: _Rule) -> tuple[list[_Candid
     candidates: list[_Candidate] = []
     rejected_for_unit = 0
 
-    for page_index, page_text in enumerate(pages, start=1):
-        normalized = normalize_for_matching(page_text)
-
+    for view in views:
         for label in rule.labels:  # 标签变体按优先级
-            # 同一页内该标签的全部出现位置都检查；只采用**第一个取到值的变体**。
-            # 更宽松的短标签若也参与，会把"口径说明"行或相邻字段的数值拉进来
-            # （实测踩坑：`(5)政府性基金及附加` 与公式行里的 `+公式编号` 同时命中）。
             label_candidates: list[_Candidate] = []
             seen_values: set[Decimal] = set()
-            for position, _hit in _locate_labels(normalized, (label,)):
-                lines = label_value_lines(normalized, position + len(label), SEARCH_WINDOW)
-                selected, rejected, _ = _scan_label_lines(lines, rule.expects_unit)
-                rejected_for_unit += rejected
-                for match in selected:
-                    # 账单会把**同一数值**以不同措辞复述（如功率因数调整电费
-                    # 既在正文写"实际功率因数调整电费为-9206.37"，
-                    # 又在"4.需（容）量电费"行再写一次 -9206.37）。
-                    # 这属于同一条数据被复述，不是冲突——按**数值**去重。
-                    # 真正的冲突（摘要与明细给出不同数值）值不同，仍会保留。
-                    if match.value in seen_values:
+
+            for label_start, _hit in _locate_labels(view.matched, (label,)):
+                line_spans = view.line_spans(label_start + len(label), SEARCH_WINDOW)
+                for line, line_start, ordinal in line_spans:
+                    if _is_formula_line(line) or _is_explanatory_line(line):
                         continue
-                    seen_values.add(match.value)
+                    # 计量点明细行不做候选（R8）
+                    if "正向有功" in line or "正向无功" in line:
+                        continue
+                    # 行尾是小数点 → 小数位被换行切开，拼接后续行后整体扫描
+                    scan_text = line
+                    if line.rstrip().endswith("."):
+                        tails = [
+                            later
+                            for later, _s, later_ordinal in line_spans
+                            if later_ordinal > ordinal
+                        ]
+                        if tails:
+                            scan_text = line + "\n" + "\n".join(tails)
+
+                    matches = scan_amounts(scan_text)
+                    if not matches:
+                        continue
+                    chosen, rejected = _select_line_candidate(
+                        scan_text, line_start, matches, rule.expects_unit
+                    )
+                    rejected_for_unit += rejected
+                    if chosen is None:
+                        continue
+                    if chosen.value in seen_values:
+                        continue
+
+                    match_end = line_start + chosen.end
+                    snippet = view.evidence_snippet(
+                        minimal_evidence_span(view.matched, label_start, match_end)
+                    )
+                    # 证据片段必须真的包含这个数值，否则说明该标签只是被"提及"
+                    # （如备注里的文号），不应作为候选。
+                    normalized_literal = chosen.literal.replace("\n", "").replace(" ", "")
+                    if normalized_literal not in snippet.replace("\n", "").replace(" ", ""):
+                        continue
+
+                    seen_values.add(chosen.value)
                     label_candidates.append(
                         _Candidate(
-                            value=match.value,
-                            raw=match.literal,
-                            unit=match.unit,
+                            value=chosen.value,
+                            raw=chosen.literal,
+                            unit=chosen.unit,
                             evidence=FieldEvidence(
-                                page_number=page_index,
-                                source_text=page_text,
-                                raw_value=match.literal,
+                                page_number=view.page_number,
+                                source_text=snippet,
+                                raw_value=chosen.literal,
                                 label=label,
                                 rule_id=f"{rule.field.value}.v1",
                             ),
                         )
                     )
+                    break  # 每个标签出现处只取一个候选
+
             if label_candidates:
-                # **该变体在同一页的多次出现都要保留**：这正是"真冲突"的来源
-                # （账单在同一页摘要与明细处给出不同数值时必须进人工复核）。
-                # 但不再尝试更宽松的变体，也不再扫描后续页
-                # （后续页多为计量点/分时明细，口径与首页汇总不同；
-                # 实测踩坑：首页输配电费 1787644.30 vs 第 2 页分时明细 679537.3）。
                 return label_candidates, rejected_for_unit
 
     return candidates, rejected_for_unit
@@ -495,8 +550,8 @@ def _build_field(
     )
 
 
-def _parse_period_dates(pages: Sequence[str]) -> tuple[BillField, BillField]:
-    """解析账期开始日与结束日。
+def _parse_period_dates(views: Sequence[_PageView]) -> tuple[BillField, BillField]:
+    """解析账期开始日与结束日（证据取原文片段）。
 
     真实账单形态为::
 
@@ -508,41 +563,44 @@ def _parse_period_dates(pages: Sequence[str]) -> tuple[BillField, BillField]:
     规则：
 
     - 按日期在原文中出现的**先后顺序**判定：第一个是开始日，第二个是结束日；
-    - 若第二个日期早于第一个（即顺序颠倒），结束日置 ``invalid``，
+    - 若第二个日期早于第一个（顺序颠倒），结束日置 ``invalid``，
       **不自动交换**——那会掩盖账单本身的数据错误；
     - 只有一个日期或没有日期时，结束日置 ``missing``。
     """
     found: list[tuple[date, FieldEvidence]] = []
 
-    for page_index, page_text in enumerate(pages, start=1):
-        normalized = normalize_for_matching(page_text)
-        anchor = normalized.find("账单周期")
+    for view in views:
+        anchor = view.matched.find("账单周期")
         if anchor < 0:
             continue
         # 账期横跨多行（开始日 / "至" / 结束日），因此取一块连续区域
-        window_text = normalized[anchor : anchor + 120]
+        window_text = view.matched[anchor : anchor + 120]
         for match in _DATE_ITER(window_text):
             year, month, day = match
             try:
                 value = date(year, month, day)
             except ValueError:
                 continue
+            literal = f"{year:04d}-{month:02d}-{day:02d}"
+            offset = window_text.find(literal)
+            absolute_start = anchor + (offset if offset >= 0 else 0)
+            snippet = view.evidence_snippet(
+                minimal_evidence_span(view.matched, anchor, absolute_start + len(literal))
+            )
             found.append(
                 (
                     value,
                     FieldEvidence(
-                        page_number=page_index,
-                        source_text=page_text,
-                        raw_value=f"{year:04d}-{month:02d}-{day:02d}",
+                        page_number=view.page_number,
+                        source_text=snippet,
+                        raw_value=literal,
                         label="账单周期",
                         rule_id="billing_period.v1",
                     ),
                 )
             )
 
-    evidences = tuple(ev for _, ev in found)
-
-    def _missing(field: FieldName, label: str) -> BillField:
+    def _missing(field: FieldName, what: str) -> BillField:
         return BillField(
             name=field.value,
             status=FieldStatus.MISSING,
@@ -551,7 +609,7 @@ def _parse_period_dates(pages: Sequence[str]) -> tuple[BillField, BillField]:
                 ValidationIssue(
                     issue_code="field_missing",
                     field_name=field.value,
-                    message=f"未找到账期{label}，值保持为空。",
+                    message=f"未找到账期{what}，值保持为空。",
                     severity=Severity.WARNING,
                 ),
             ),
@@ -566,33 +624,22 @@ def _parse_period_dates(pages: Sequence[str]) -> tuple[BillField, BillField]:
         )
 
     first_value = found[0][0]
-
-    if len(found) == 1:
-        start_field = BillField(
-            name=FieldName.BILLING_PERIOD_START.value,
-            status=FieldStatus.PARSED,
-            unit=FIELD_UNITS.get(FieldName.BILLING_PERIOD_START),
-            value=first_value,
-            raw_value=first_value.isoformat(),
-            evidences=evidences,
-            candidates=(),
-            parser_version=PARSING_VERSION,
-            requires_manual_confirmation=False,
-        )
-        return start_field, _missing(FieldName.BILLING_PERIOD_END, "结束日")
-
-    second_value = found[1][0]
     start_field = BillField(
         name=FieldName.BILLING_PERIOD_START.value,
         status=FieldStatus.PARSED,
         unit=FIELD_UNITS.get(FieldName.BILLING_PERIOD_START),
         value=first_value,
         raw_value=first_value.isoformat(),
-        evidences=evidences,
+        evidences=(found[0][1],),
         candidates=(),
         parser_version=PARSING_VERSION,
         requires_manual_confirmation=False,
     )
+
+    if len(found) == 1:
+        return start_field, _missing(FieldName.BILLING_PERIOD_END, "结束日")
+
+    second_value = found[1][0]
 
     if second_value < first_value:
         # 顺序颠倒：属数据错误，置 invalid 并交人工确认（不自动交换）
@@ -602,7 +649,7 @@ def _parse_period_dates(pages: Sequence[str]) -> tuple[BillField, BillField]:
             unit=FIELD_UNITS.get(FieldName.BILLING_PERIOD_END),
             value=None,
             raw_value=second_value.isoformat(),
-            evidences=evidences,
+            evidences=(found[1][1],),
             candidates=(),
             issues=(
                 ValidationIssue(
@@ -619,18 +666,17 @@ def _parse_period_dates(pages: Sequence[str]) -> tuple[BillField, BillField]:
             requires_manual_confirmation=True,
         )
 
-    end_field = BillField(
+    return start_field, BillField(
         name=FieldName.BILLING_PERIOD_END.value,
         status=FieldStatus.PARSED,
         unit=FIELD_UNITS.get(FieldName.BILLING_PERIOD_END),
         value=second_value,
         raw_value=second_value.isoformat(),
-        evidences=evidences,
+        evidences=(found[1][1],),
         candidates=(),
         parser_version=PARSING_VERSION,
         requires_manual_confirmation=False,
     )
-    return start_field, end_field
 
 
 def _DATE_ITER(text: str):
@@ -640,77 +686,81 @@ def _DATE_ITER(text: str):
         yield tuple(int(g) for g in match.groups())
 
 
-def _parse_industrial_fee(pages: Sequence[str], rule: _Rule) -> BillField:
-    """解析工商业电费。
+def _parse_industrial_fee(views: Sequence[_PageView], rule: _Rule) -> BillField:
+    """解析工商业电费（证据取原文片段）。
 
     真实账单该处形如::
 
-        工商业电费：用电户-110千伏-大工业用电-...、用电户-35千伏-非居民照明-...
+        工商业电费：用电户-110千伏-大工业用电-...
+        工商业两部制、用电户-35千伏-非居民照明-...
+        明-工商业单一制
         8780498 6708448.31
 
     标签之后紧跟的是**电压等级**（``-110``、``-35``），必须跳过；
-    真正的电费在**下一行**，且与计费电量同行（``电量 金额``）。
-
-    两行的取值策略：
-
-    - 电压等级行：数值后跟参数单位（千伏），已被 :func:`scan_amounts` 排除；
-    - 金额行：本行通常没有单位（真实账单的单位由表头给出），
-      行内形如"数量在前、金额在后"，因此取**最后一个**裸数值。
-
-    若某行出现带明确金额单位的数值（如 ``￥``），优先采用它。
+    真正的电费在若干行之后，且与计费电量同行（``电量 金额``），
+    因此取该行**最后一个**裸数值（金额在后）。
     """
     candidates: list[_Candidate] = []
     rejected = 0
+    seen_values: set[Decimal] = set()
 
-    for page_index, page_text in enumerate(pages, start=1):
-        normalized = normalize_for_matching(page_text)
-        for position, label in _locate_labels(normalized, rule.labels):
-            # 工商业电费在账单里会出现两次：
-            #   ① 顶部"用能分析"处，标签后跟多行说明，数值在第 3 行；
-            #   ② 末尾"口径说明"处 `3.工商业电费=(1)市场化购电电费+...`（公式，非数据）。
-            # 因此放宽跳过上限，并显式跳过公式行。
-            lines = label_value_lines(
-                normalized,
-                position + len(label),
-                SEARCH_WINDOW + 40,
-                max_skip=6,
-                is_value_line=_has_amount_like_number,
-            )
-            for line in lines:
-                if _is_formula_line(line) or _is_explanatory_line(line):
-                    continue
-                matches = scan_amounts(line)
-                if not matches:
-                    continue
-                typed = [m for m in matches if m.unit in YEN_UNITS]
-                if typed:
-                    chosen = typed
-                else:
-                    bare = [m for m in matches if m.unit is None]
-                    if not bare:
-                        rejected += len(matches)
+    for view in views:
+        for label in rule.labels:
+            for label_start, _hit in _locate_labels(view.matched, (label,)):
+                # 工商业电费在账单里会出现两次：
+                #   ① 顶部"用能分析"，标签后跟多行说明，数值在后面几行；
+                #   ② 末尾"口径说明" `3.工商业电费=(1)...`（公式，非数据）。
+                # 因此放宽跳过上限，并显式跳过公式行与引用/说明行。
+                line_spans = view.line_spans(
+                    label_start + len(label),
+                    SEARCH_WINDOW + 40,
+                    max_skip=6,
+                    is_value_line=_has_amount_like_number,
+                )
+                for line, line_start, _ordinal in line_spans:
+                    if _is_formula_line(line) or _is_explanatory_line(line):
                         continue
-                    # "计费电量 金额"同行 → 金额在后
-                    chosen = [bare[-1]]
-                for match in chosen:
+                    matches = scan_amounts(line)
+                    if not matches:
+                        continue
+                    typed = [m for m in matches if m.unit in YEN_UNITS]
+                    if typed:
+                        chosen = typed[0]
+                    else:
+                        bare = [m for m in matches if m.unit is None]
+                        if not bare:
+                            rejected += len(matches)
+                            continue
+                        chosen = bare[-1]  # "计费电量 金额"同行 → 金额在后
+
+                    if chosen.value in seen_values:
+                        continue
+                    match_end = line_start + chosen.end
+                    snippet = view.evidence_snippet(
+                        minimal_evidence_span(view.matched, label_start, match_end)
+                    )
+                    normalized_literal = chosen.literal.replace("\n", "").replace(" ", "")
+                    if normalized_literal not in snippet.replace("\n", "").replace(" ", ""):
+                        continue
+                    seen_values.add(chosen.value)
                     candidates.append(
                         _Candidate(
-                            value=match.value,
-                            raw=match.literal,
-                            unit=match.unit,
+                            value=chosen.value,
+                            raw=chosen.literal,
+                            unit=chosen.unit,
                             evidence=FieldEvidence(
-                                page_number=page_index,
-                                source_text=page_text,
-                                raw_value=match.literal,
+                                page_number=view.page_number,
+                                source_text=snippet,
+                                raw_value=chosen.literal,
                                 label=label,
                                 rule_id=f"{rule.field.value}.v1",
                             ),
                         )
                     )
-                # 只在**第一个取到数值的行**取值。
-                # 否则标签之后"用能分析"段落里的环比、峰谷比例等数字
-                # 会被当成候选，制造大量假冲突（实测踩坑）。
-                break
+                    break
+
+            if candidates:
+                return _build_field(rule, candidates, rejected_for_unit=rejected)
 
     return _build_field(rule, candidates, rejected_for_unit=rejected)
 
@@ -782,13 +832,16 @@ def parse_bill_fields(
     Note:
         业务问题（缺失、冲突、单位不明）通过字段状态表达，**不抛异常**，
         以便界面逐条展示并交人工复核。
+
+        返回结果的 ``confirmation`` 为 ``PENDING``：**解析成功不等于可以进入
+        正式测算**，必须经 :meth:`BillFieldSet.confirm` 人工确认。
     """
-    prepared = _prepare_pages(pages)
-    resolved_page_count = len(prepared) if page_count is None else page_count
+    views = _build_page_views(pages)
+    resolved_page_count = len(pages) if page_count is None else page_count
 
     fields: dict[str, BillField] = {}
 
-    period_start, period_end = _parse_period_dates(prepared)
+    period_start, period_end = _parse_period_dates(views)
     fields[FieldName.BILLING_PERIOD_START.value] = period_start
     fields[FieldName.BILLING_PERIOD_END.value] = period_end
 
@@ -798,11 +851,11 @@ def parse_bill_fields(
         FieldName.INDUSTRIAL_COMMERCIAL_FEE, ("工商业电费：",), expects_unit="amount"
     )
     fields[FieldName.INDUSTRIAL_COMMERCIAL_FEE.value] = _parse_industrial_fee(
-        prepared, industrial_rule
+        views, industrial_rule
     )
 
     for rule in _RULES:
-        candidates, rejected = _collect_candidates(prepared, rule)
+        candidates, rejected = _collect_candidates(views, rule)
         fields[rule.field.value] = _build_field(rule, candidates, rejected_for_unit=rejected)
 
     reconciliations = _build_reconciliations(fields)

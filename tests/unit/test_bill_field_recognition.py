@@ -536,18 +536,25 @@ class TestExtractionStatusLinkage:
         result = parse_bill_fields([BILL_2025_09_SNIPPET], page_count=1, extraction_status=status)
         assert result.is_usable_for_calculation is False
 
-    def test_success_extraction_with_all_fields_is_usable(self) -> None:
+    def test_success_extraction_with_all_fields_is_usable_only_after_confirmation(self) -> None:
+        """解析成功且字段齐全：仍需人工确认后才可用于正式测算。"""
         result = _parse(BILL_2025_09_SNIPPET)
         assert result.is_complete_extraction is True
-        assert result.is_usable_for_calculation is True
+        assert result.is_parsed_and_ready_for_review is True
+        # 未确认 → 不可用于正式测算
+        assert result.is_usable_for_calculation is False
+        # 人工确认后 → 可用于正式测算
+        assert result.confirm(confirmed_by="tester").is_usable_for_calculation is True
 
     def test_parse_success_is_not_bill_valid(self) -> None:
         """解析成功不等于账单有效：字段集不携带任何"已确认"状态。"""
         result = _parse(BILL_2025_09_SNIPPET)
         payload = result.to_dict()
-        assert "is_usable_for_calculation" in payload
-        assert "confirmed" not in payload
-        assert not hasattr(result, "is_confirmed")
+        # 解析成功、字段齐全，但确认状态为 pending，且不可用于正式测算
+        assert payload["is_parsed_and_ready_for_review"] is True
+        assert payload["confirmation"]["status"] == "pending"
+        assert payload["is_confirmed"] is False
+        assert payload["is_usable_for_calculation"] is False
 
 
 # ---------------------------------------------------------------------------
