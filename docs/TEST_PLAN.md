@@ -1,10 +1,10 @@
 # CENEP 测试计划（TEST PLAN）
 
-- 文档版本：`2026.10-stage1-r4`
+- 文档版本：`2026.10-phase2-p0-1`
 - 软件版本：`0.1.0`
 - 对应测试目录：`tests/`
-- 当前基线：**244 个用例，全部通过**（实测结果见 `docs/ACCEPTANCE_CRITERIA.md`）
-- 最近一次实测：2026-10-11，Python 3.14.7，Windows 11，`244 passed`
+- 当前基线：**302 个用例，全部通过**（实测结果见 `docs/ACCEPTANCE_CRITERIA.md`）
+- 最近一次实测：2026-10-11，Python 3.14.7，Windows 11，`302 passed`
 
 按文件分布（实测 `pytest --collect-only -q` 输出）：
 
@@ -12,14 +12,15 @@
 |---|---:|---|
 | `tests/integration/test_database.py` | 51 | 集成 |
 | `tests/integration/test_database_memory_and_schema_version.py` | 45 | 集成（内存库与模式版本保护） |
-| `tests/unit/test_gui_main_window.py` | 17 | 界面（标记 `gui`） |
-| `tests/unit/test_layering.py` | 16 | 单元（架构约束） |
+| `tests/unit/test_gui_main_window.py` | 17 | 界面（标记 gui） |
+| `tests/unit/test_layering.py` | 18 | 单元（架构约束） |
 | `tests/unit/test_package_import.py` | 21 | 单元 / 应用验证 |
+| `tests/unit/test_pdf_extraction.py` | 56 | 单元（P0-1 PDF 提取） |
 | `tests/unit/test_self_consumption.py` | 42 | 单元 |
 | `tests/unit/test_validation.py` | 52 | 单元 |
-| **合计** | **244** | |
+| **合计** | **302** | |
 
-小计：单元与界面测试 148 个，集成测试 96 个。
+小计：单元与界面测试 206 个，集成测试 96 个。
 
 > 用例数量随缺陷修复与功能增加而变化。判断质量的标准是
 > **`0 failed`、`0 error`、`0 skipped`**，而不是数量本身。
@@ -91,7 +92,7 @@
 | `TestResultStructure` | 返回结构化 dataclass；`to_dict()` 含全部必需字段；未定义比例在字典中保持 `None`；比例为 0~1 比值；负荷覆盖率不超过 1；`to_metric_rows()` 标记 `undefined`；正常比例标记 `ok` 且共 8 行；输入指纹稳定且对输入敏感；守恒自检能发现人为构造的违例 |
 | `TestNonRaisingEntryPoint` | 成功路径；失败路径返回问题而不返回结果；仅有警告时仍返回结果 |
 
-### 4.3 `tests/unit/test_layering.py`（16 个用例）
+### 4.3 `tests/unit/test_layering.py`（18 个用例）
 
 | 测试类 | 覆盖内容 |
 |---|---|
@@ -119,6 +120,30 @@
 | `TestProjectCreationFromGui` | 对话框取值与类型枚举还原；**界面创建的项目真实落库**（用全新连接验证）；表格行携带项目主键 |
 | `TestCalculationFromGui` | 界面计算结果含 9/2/4/13/11 kWh 与 0.818182、0.692308、0.181818；空输入的"未定义"提示；`_parse_series` 拒绝非法 token；接受中文逗号与顿号；**负数原样传递不修正** |
 | `TestInvalidInputHandling` | 长度不一致时给出明确提示且界面不崩溃；非法时间粒度被拒绝且不产生计算结果 |
+
+### 4.6 `tests/unit/test_pdf_extraction.py`（56 个用例）
+
+对应第二阶段 P0-1。测试样本全部由 `tests/unit/pdf_fixtures.py` 在运行时生成，
+仓库内不保存任何 PDF 二进制，也不使用真实客户账单。
+
+| 测试类 | 覆盖内容 |
+|---|---|
+| `TestSinglePagePdf` | 单页成功；文本提取；文件元数据（哈希/大小/名称）；文件名不泄露目录 |
+| `TestMultipagePdf` | 多页页数与顺序；**多页文本不合并、不串页**；中文多页 |
+| `TestChineseText` | 中文字符完整提取；中文标点与数字；字符数一致 |
+| `TestEmptyFile` | 空文件报失败而非成功；空文件哈希仍计算 |
+| `TestCorruptPdf` | 截断 PDF；仅含文件头；损坏不抛异常；**损坏与无文本层状态不同** |
+| `TestNotAPdf` | 文本文件冒充 PDF；二进制非 PDF；目录；文件不存在 |
+| `TestNoTextLayer` | 空白 PDF 判为 `needs_ocr` 而非成功；空白页仍如实反映页数；纯空白不算文本层；领域模型阻止"非成功却声称有文本层" |
+| `TestFileHash` | 与 hashlib 一致；跨调用与跨路径稳定；内容变化则变化；**同一内容不同文件名同哈希**；缺失文件抛错 |
+| `TestPageNumberMapping` | 页码从 1 连续；每页映射自身文本；越界抛错；领域模型拒绝页码不一致与页数不匹配 |
+| `TestExplicitFailureStates` | 每种失败都有错误码与信息；失败不声称有页；`None` 路径抛编程错误；摘要不含完整文本 |
+| `TestNoLeftoverFiles` | 提取不产生额外文件；无 `.tmp/.part` 残留 |
+| `TestSourceFileUntouched` | 内容与 mtime 不变；重复提取结果稳定 |
+| `TestNormalizePageText` | `None`→空串；换行统一；仅去行尾空白；**内部内容（数字换行截断、汉字插空格）原样保留**；非字符串抛错 |
+| `TestPdfPageModel` | 页码必须为正；字符数派生；摘要压缩空白；可序列化 |
+| `TestResultSerialization` | 必需字段齐备；失败时保持 `None` 不补 0 |
+| `TestParserMetadata` | 解析器名为 pypdf；版本取自实际安装库而非硬编码 |
 
 ---
 

@@ -97,16 +97,54 @@ class TestLayerIsolation:
             for module, _ in _imported_modules(path):
                 assert not _matches(module, "cenep.ui"), f"{path.name} 非法依赖界面层"
 
-    def test_pdf_and_ocr_libraries_not_used_in_stage_one(self) -> None:
-        """第一阶段不做账单解析，任何层都不应引入 PDF/OCR 库。"""
+    def test_pdf_libraries_only_allowed_in_infrastructure(self) -> None:
+        """PDF 解析库只允许出现在基础设施层。
+
+        第一阶段曾完全禁止 PDF 库；第二阶段 P0-1 引入 ``pypdf`` 后，
+        规则收紧为"只在基础设施层允许"：
+
+        - ``domain`` / ``calculations``：禁止（保持纯领域与纯计算）；
+        - ``application``：禁止（只编排流程，不直接解析文件）；
+        - ``ui``：禁止（界面不得直接操作 PDF，必须走应用服务）；
+        - ``infrastructure``：允许（解析库是基础设施实现细节）。
+
+        该约束保证未来替换解析库（例如换成 pdfplumber）不影响上层。
+        """
         pdf_prefixes = ("pdfminer", "PyPDF2", "pypdf", "fitz", "pytesseract", "cv2", "PIL")
+        allowed_layers = ("infrastructure",)
         offenders: list[str] = []
+
         for path in _iter_python_files(SRC_DIR):
+            relative = path.relative_to(SRC_DIR)
+            if relative.parts and relative.parts[0] in allowed_layers:
+                continue
             for module, lineno in _imported_modules(path):
                 for prefix in pdf_prefixes:
                     if _matches(module, prefix):
-                        offenders.append(f"{path}:{lineno} 导入了 {module}")
-        assert not offenders, "第一阶段不应引入 PDF/OCR 依赖：\n" + "\n".join(offenders)
+                        offenders.append(f"{relative}:{lineno} 导入了 {module}")
+
+        assert not offenders, (
+            "PDF/OCR 依赖只允许出现在基础设施层，以下位置越界：\n" + "\n".join(offenders)
+        )
+
+    def test_infrastructure_pdf_layer_actually_uses_pypdf(self) -> None:
+        """反向检查：解析器确实通过 pypdf 实现，而不是自己造轮子或空实现。"""
+        extractor = SRC_DIR / "infrastructure" / "pdf" / "extractor.py"
+        assert extractor.exists(), "缺少 PDF 提取器实现"
+        modules = [module for module, _ in _imported_modules(extractor)]
+        assert any(_matches(module, "pypdf") for module in modules), (
+            "extractor.py 应当导入 pypdf 完成真实解析"
+        )
+
+    def test_domain_pdf_model_has_no_pdf_dependency(self) -> None:
+        """领域层的 PDF 模型必须与解析库彻底解耦。"""
+        domain_model = SRC_DIR / "domain" / "pdf_extraction.py"
+        assert domain_model.exists(), "缺少 PDF 领域模型"
+        for module, lineno in _imported_modules(domain_model):
+            for prefix in ("pypdf", "PyPDF2", "pdfminer", "fitz", "sqlite3", "PySide6", "shiboken6"):
+                assert not _matches(module, prefix), (
+                    f"{domain_model.name}:{lineno} 不应导入 {module}"
+                )
 
 
 class TestUIContainsNoBusinessFormulas:

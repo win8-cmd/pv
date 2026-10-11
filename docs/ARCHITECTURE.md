@@ -225,6 +225,36 @@ calculate_self_consumption_with_issues(load, pv, *, interval_minutes=None) \
 - 其他异常 → 回滚后原样上抛（业务异常不被吞掉）；
 - 每次连接都执行 `PRAGMA foreign_keys = ON`，文件库额外启用 WAL。
 
+### 3.6.1 `cenep/domain/pdf_extraction.py` 与 `cenep/infrastructure/pdf/`
+
+第二阶段 P0-1 引入的 PDF 文本提取，刻意拆成两层：
+
+| 模块 | 层 | 依赖 | 职责 |
+|---|---|---|---|
+| `domain/pdf_extraction.py` | 领域层 | **纯 Python**（无 pypdf/Qt/sqlite3） | `PdfExtractionStatus`、`PdfPage`、`PdfExtractionResult`、文本规范化 |
+| `infrastructure/pdf/extractor.py` | 基础设施层 | `pypdf` | 打开 PDF、逐页提取、SHA-256、文本层判定、异常映射 |
+
+**为什么这样拆**：解析库是"实现细节"，而"一页文本、一次提取的状态"是领域语言。
+界面与业务只依赖领域模型，未来把 `pypdf` 换成 `pdfplumber` 不需要改动上层。
+
+约束（由 `tests/unit/test_layering.py` 强制）：
+
+- PDF 解析库**只允许**出现在 `infrastructure`；
+  `domain`、`calculations`、`application`、`ui` 一律禁止导入。
+- `domain/pdf_extraction.py` 不得导入 `pypdf`、`sqlite3`、`PySide6`。
+
+状态语义（三者互不混淆）：
+
+| 状态 | 含义 | 关键点 |
+|---|---|---|
+| `success` | 至少一页存在可用文本层 | 只有此状态允许 `text_layer_available=True` |
+| `needs_ocr` | 文件可打开，但整篇无可用文本 | **不是失败，也绝不是解析成功**；须提示需要 OCR |
+| `failed` | 文件缺失、为空、非 PDF 或损坏 | 返回结果对象而不抛异常，界面不会崩溃 |
+| `duplicate` | 内容哈希与已登记文件相同 | 需数据库参与，**由应用服务层判定，提取器不产生** |
+
+工程约定：不使用临时文件（因此无清理问题）；原始 PDF 只读；
+失败通过结果对象表达，只有"参数非法"这类编程错误才抛 `PdfExtractionError`。
+
 ### 3.7 `cenep/ui/main_window.py`
 
 | 类/函数 | 职责 |
