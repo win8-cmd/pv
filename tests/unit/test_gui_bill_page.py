@@ -306,13 +306,24 @@ class TestReportExportFromGui:
         page.on_export_report()
         assert list(tmp_path.glob("*.xlsx")) == [], "取消后不得生成文件"
 
-    def test_export_failure_surfaces_error(self, services, page, monkeypatch) -> None:
-        """写入失败必须报错，不得静默。"""
+    def test_export_failure_surfaces_error(
+        self, services, page, monkeypatch, tmp_path
+    ) -> None:
+        """写入失败必须报错，不得静默。
+
+        用"把普通文件当目录用"来构造必然失败的目标：
+        该写法在 Windows 与 Linux 上都会抛 OSError，
+        而 `"Z:/..."` 这类盘符路径在 Linux 上只是普通相对路径、会写入成功
+        （跨平台陷阱，实测发现）。
+        """
         self._add(services, page)
+        blocker = tmp_path / "not_a_directory"
+        blocker.write_text("占位文件，用于让同名目录创建失败", encoding="utf-8")
+        bad_target = blocker / "r.xlsx"
         monkeypatch.setattr(
             QtWidgets.QFileDialog,
             "getSaveFileName",
-            lambda *a, **k: ("Z:/definitely/not/writable/r.xlsx", ""),
+            lambda *a, **k: (str(bad_target), ""),
         )
         captured: list[tuple] = []
         monkeypatch.setattr(
