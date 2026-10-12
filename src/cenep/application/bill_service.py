@@ -666,3 +666,68 @@ class BillService:
         """返回复核状态为"存在疑问"的账单（阻断测算，需先解决）。"""
         self.ensure_initialized()
         return self.list_bills_by_review_status(project_id, ReviewStatus.QUESTIONABLE)
+
+    # -- 报告导出 -------------------------------------------------------
+    def build_report(
+        self,
+        project_id: str,
+        *,
+        project_name: str | None = None,
+        generated_at: str | None = None,
+    ):
+        """组装账单事实报告数据（**不写文件**）。
+
+        Returns:
+            :class:`cenep.data.report_data.ReportBundle`。
+        """
+        self.ensure_initialized()
+        from cenep.data.report_data import build_report_bundle
+
+        bills = self.list_bills(project_id)
+        tou: list[BillTimeOfUseItem] = []
+        fees: list[BillFeeItem] = []
+        points: list[BillMeterPoint] = []
+        for bill in bills:
+            tou.extend(self.list_tou_items(bill.bill_id))
+            fees.extend(self.list_fee_items(bill.bill_id))
+            points.extend(self.list_meter_points(bill.bill_id))
+
+        return build_report_bundle(
+            project_id=project_id,
+            project_name=project_name or project_id,
+            bills=bills,
+            tou_items=tou,
+            fee_items=fees,
+            meter_points=points,
+            generated_at=generated_at,
+        )
+
+    def export_report(
+        self,
+        project_id: str,
+        path: str | Path,
+        *,
+        project_name: str | None = None,
+        generated_at: str | None = None,
+    ) -> Path:
+        """导出账单事实报告为 Excel 文件。
+
+        Args:
+            project_id: 项目主键。
+            path: 目标文件路径（扩展名会修正为 ``.xlsx``）。
+            project_name: 显示用项目名称；默认用项目主键。
+            generated_at: 生成时间（ISO 8601），便于测试固定输出。
+
+        Returns:
+            实际写入的文件路径。
+
+        Raises:
+            OSError: 文件写入失败。
+        """
+        self.ensure_initialized()
+        from cenep.data.report_writer import write_report
+
+        bundle = self.build_report(
+            project_id, project_name=project_name, generated_at=generated_at
+        )
+        return write_report(bundle, path)

@@ -51,6 +51,7 @@ from cenep.data.bill_import_service import (
     ImportPreview,
 )
 from cenep.data.template_reader import TemplateReadError
+from cenep.data.report_writer import default_report_name
 from cenep.data.template_writer import default_template_path, write_template
 from cenep.domain.bill_models import ElectricityBill, ReviewStatus
 from cenep.domain.exceptions import CENEPError
@@ -366,6 +367,7 @@ class BillPage(QWidget):
         self._confirm_button = QPushButton("人工确认")
         self._import_button = QPushButton("导入 Excel 模板")
         self._template_button = QPushButton("生成模板文件")
+        self._report_button = QPushButton("导出账单报告")
 
         self._create_button.clicked.connect(self.on_create)
         self._edit_button.clicked.connect(self.on_edit)
@@ -374,6 +376,7 @@ class BillPage(QWidget):
         self._confirm_button.clicked.connect(self.on_confirm)
         self._import_button.clicked.connect(self.on_import)
         self._template_button.clicked.connect(self.on_generate_template)
+        self._report_button.clicked.connect(self.on_export_report)
 
         buttons = QHBoxLayout()
         for button in (
@@ -384,6 +387,7 @@ class BillPage(QWidget):
             self._confirm_button,
             self._import_button,
             self._template_button,
+            self._report_button,
         ):
             buttons.addWidget(button)
         buttons.addStretch(1)
@@ -657,3 +661,39 @@ class BillPage(QWidget):
 
         QMessageBox.information(self, "导入结果", "\n".join(result.summary_lines()))
         self.refresh_bills()
+
+    def on_export_report(self) -> None:
+        """导出账单事实报告（Excel）。
+
+        **不含经济性结论**：报告只呈现账单事实与数据质量。
+        """
+        project_id = self._project_id
+        if not project_id:
+            QMessageBox.critical(self, "无法导出", "请先选择项目。")
+            return
+        if not self._service.list_bills(project_id):
+            QMessageBox.critical(self, "无法导出", "该项目暂无账单，导出为空报告无意义。")
+            return
+
+        suggested = default_report_name(self._project_combo.currentText())
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出账单报告", suggested, "Excel 文件 (*.xlsx)"
+        )
+        if not path:
+            return
+        try:
+            written = self._service.export_report(
+                project_id, path, project_name=self._project_combo.currentText()
+            )
+        except (CENEPError, OSError, ValueError) as exc:
+            QMessageBox.critical(self, "导出失败", f"报告未生成：{exc}")
+            return
+        QMessageBox.information(
+            self,
+            "报告已导出",
+            f"已生成：{written}\n\n"
+            "报告含 6 张工作表：报告说明、数据概览、数据完整性、账单事实、"
+            "费用明细、分时与计量点。\n"
+            "报告只呈现账单事实与数据质量，<b>不含收益率等经济性结论</b>；"
+            "未提供的字段显示为“未提供”。",
+        )

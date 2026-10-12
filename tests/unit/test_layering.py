@@ -272,6 +272,8 @@ class TestProjectStructure:
             "data/template_mapping.py",
             "data/bill_validation.py",
             "data/bill_import_service.py",
+            "data/report_data.py",
+            "data/report_writer.py",
             "ui/__init__.py",
             "ui/main_window.py",
             "ui/bill_page.py",

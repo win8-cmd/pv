@@ -259,6 +259,86 @@ class TestBillPageErrors:
         assert "样本" in str(captured[0])
 
 
+class TestReportExportFromGui:
+    def test_report_button_exists(self, page) -> None:
+        buttons = [b.text() for b in page.findChildren(QtWidgets.QPushButton)]
+        assert "导出账单报告" in buttons
+
+    def test_export_refuses_empty_project(self, page, monkeypatch) -> None:
+        """无账单时不得导出空报告，必须报错。"""
+        captured: list[tuple] = []
+        monkeypatch.setattr(
+            QtWidgets.QMessageBox, "critical", lambda *a, **k: captured.append(a)
+        )
+        page.on_export_report()
+        assert captured, "空项目导出必须报错"
+
+    def test_export_writes_report(self, services, page, monkeypatch, tmp_path) -> None:
+        """点击导出必须真实生成 6 张工作表的 xlsx。"""
+        from openpyxl import load_workbook
+
+        from cenep.data.report_writer import REPORT_SHEET_NAMES
+
+        self._add(services, page)
+        target = tmp_path / "gui_report.xlsx"
+        monkeypatch.setattr(
+            QtWidgets.QFileDialog,
+            "getSaveFileName",
+            lambda *a, **k: (str(target), "Excel 文件 (*.xlsx)"),
+        )
+        captured: list[tuple] = []
+        monkeypatch.setattr(
+            QtWidgets.QMessageBox, "information", lambda *a, **k: captured.append(a)
+        )
+
+        page.on_export_report()
+
+        assert target.exists(), "报告文件必须真实生成"
+        workbook = load_workbook(target)
+        assert tuple(workbook.sheetnames) == REPORT_SHEET_NAMES
+        assert captured, "导出后应提示结果"
+
+    def test_export_cancelled_writes_nothing(self, services, page, monkeypatch, tmp_path) -> None:
+        self._add(services, page)
+        monkeypatch.setattr(
+            QtWidgets.QFileDialog, "getSaveFileName", lambda *a, **k: ("", "")
+        )
+        page.on_export_report()
+        assert list(tmp_path.glob("*.xlsx")) == [], "取消后不得生成文件"
+
+    def test_export_failure_surfaces_error(self, services, page, monkeypatch) -> None:
+        """写入失败必须报错，不得静默。"""
+        self._add(services, page)
+        monkeypatch.setattr(
+            QtWidgets.QFileDialog,
+            "getSaveFileName",
+            lambda *a, **k: ("Z:/definitely/not/writable/r.xlsx", ""),
+        )
+        captured: list[tuple] = []
+        monkeypatch.setattr(
+            QtWidgets.QMessageBox, "critical", lambda *a, **k: captured.append(a)
+        )
+        page.on_export_report()
+        assert captured, "导出失败必须报错"
+
+    def _add(self, services, page, **overrides):
+        _, bill_service, project_id = services
+        payload = dict(
+            billing_period="2025-09",
+            period_start="2025-09-01",
+            period_end="2025-09-30",
+            account_number="1234567890",
+            total_energy_kwh="8780498",
+            total_amount_yuan="6699241.94",
+            source_file="2025-09账单.pdf",
+            source_page="1",
+            review_status="已复核",
+        )
+        payload.update(overrides)
+        bill_service.create_bill(project_id, ManualBillInput(**payload))
+        page.refresh_bills()
+
+
 class _FakeDialog:
     """替代 BillDialog 的测试替身（不弹真窗口）。"""
 
