@@ -667,6 +667,32 @@ class BillService:
         self.ensure_initialized()
         return self.list_bills_by_review_status(project_id, ReviewStatus.QUESTIONABLE)
 
+    # -- 模板与文件生成 -------------------------------------------------
+    def generate_template(self, path: str | Path | None = None, *,
+                          directory: str | Path | None = None) -> Path:
+        """生成标准 Excel 导入模板文件并返回实际路径。
+
+        界面与命令行都应经此方法获取模板，**不得直接调用 cenep.data**。
+        """
+        from cenep.application.report_files import write_template_file
+
+        return write_template_file(path, directory=directory)
+
+    def default_template_path(self) -> Path:
+        """模板默认路径（供文件对话框预填）。"""
+        from cenep.application.report_files import (
+            default_template_directory,
+            default_template_file_name,
+        )
+
+        return default_template_directory() / default_template_file_name()
+
+    def default_report_path(self, project_name: str) -> Path:
+        """报告默认路径（供文件对话框预填）。"""
+        from cenep.application.report_files import default_report_file_name
+
+        return Path.cwd() / default_report_file_name(project_name)
+
     # -- 报告导出 -------------------------------------------------------
     def build_report(
         self,
@@ -725,9 +751,9 @@ class BillService:
             OSError: 文件写入失败。
         """
         self.ensure_initialized()
-        from cenep.data.report_writer import write_report
+        from cenep.application.report_files import write_report_file
 
         bundle = self.build_report(
             project_id, project_name=project_name, generated_at=generated_at
         )
-        return write_report(bundle, path)
+        return write_report_file(bundle, path)

@@ -378,6 +378,41 @@ class TestNoFakeImplementations:
             assert "sqlite3" not in text, f"{path.name} 不应直接使用 sqlite3"
             assert "INSERT INTO" not in text.upper(), f"{path.name} 不应包含 SQL 写入"
 
+    def test_ui_does_not_import_data_layer(self) -> None:
+        """界面层不得直接导入 ``cenep.data``。
+
+        背景：实测发现账单页面曾直接调用
+        ``cenep.data.template_writer.write_template`` 与
+        ``cenep.data.report_writer``，绕过了应用层 —— 与"界面层只经应用服务
+        访问业务能力"的声明不符。所需类型与函数现由 ``cenep.application`` 转出，
+        本测试防止再次回退。
+        """
+        for path in sorted((SRC_DIR / "ui").glob("*.py")):
+            for lineno, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                stripped = line.strip()
+                if not (stripped.startswith("from cenep.data") or stripped.startswith("import cenep.data")):
+                    continue
+                # 允许在文档字符串/注释中提到，但不允许真实导入
+                raise AssertionError(
+                    f"{path.name}:{lineno} 界面层不得直接导入 data 层：{stripped}"
+                )
+
+    def test_ui_does_not_import_infrastructure_layer(self) -> None:
+        """界面层不得直接导入 ``cenep.infrastructure``（仓储与数据库）。"""
+        for path in sorted((SRC_DIR / "ui").glob("*.py")):
+            for lineno, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                stripped = line.strip()
+                if stripped.startswith("from cenep.infrastructure") or stripped.startswith(
+                    "import cenep.infrastructure"
+                ):
+                    raise AssertionError(
+                        f"{path.name}:{lineno} 界面层不得直接导入基础设施层：{stripped}"
+                    )
+
     def test_ui_uses_application_service_for_bills(self) -> None:
         """账单页面必须经应用服务访问业务能力，不得直接依赖 data/infrastructure。"""
         text = (SRC_DIR / "ui" / "bill_page.py").read_text(encoding="utf-8")

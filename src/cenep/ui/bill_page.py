@@ -45,14 +45,12 @@ from PySide6.QtWidgets import (
 )
 
 from cenep.application.bill_service import BillService, ManualBillInput
-from cenep.data.bill_import_service import (
+from cenep.application import (
     DuplicateDecision,
     ImportDecision,
     ImportPreview,
+    TemplateReadError,
 )
-from cenep.data.template_reader import TemplateReadError
-from cenep.data.report_writer import default_report_name
-from cenep.data.template_writer import default_template_path, write_template
 from cenep.domain.bill_models import ElectricityBill, ReviewStatus
 from cenep.domain.exceptions import CENEPError
 
@@ -608,14 +606,15 @@ class BillPage(QWidget):
         self.refresh_bills()
 
     def on_generate_template(self) -> None:
+        default_path = self._service.default_template_path()
         path, _ = QFileDialog.getSaveFileName(
-            self, "保存标准模板", default_template_path().name, "Excel 文件 (*.xlsx)"
+            self, "保存标准模板", str(default_path), "Excel 文件 (*.xlsx)"
         )
         if not path:
             return
         try:
-            written = write_template(path)
-        except OSError as exc:
+            written = self._service.generate_template(path)
+        except (OSError, CENEPError, ValueError) as exc:
             QMessageBox.critical(self, "模板生成失败", str(exc))
             return
         QMessageBox.information(
@@ -675,9 +674,9 @@ class BillPage(QWidget):
             QMessageBox.critical(self, "无法导出", "该项目暂无账单，导出为空报告无意义。")
             return
 
-        suggested = default_report_name(self._project_combo.currentText())
+        suggested = self._service.default_report_path(self._project_combo.currentText())
         path, _ = QFileDialog.getSaveFileName(
-            self, "导出账单报告", suggested, "Excel 文件 (*.xlsx)"
+            self, "导出账单报告", str(suggested), "Excel 文件 (*.xlsx)"
         )
         if not path:
             return
