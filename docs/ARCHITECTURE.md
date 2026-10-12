@@ -90,6 +90,8 @@ CENEP 采用 **Python 模块化单体（modular monolith）** 架构，严格分
 | 基础设施层不依赖界面层 | `...::test_infrastructure_does_not_import_ui` |
 | PDF 解析库只允许出现在基础设施层 | `...::test_pdf_libraries_only_allowed_in_infrastructure` |
 | Excel 读写库只允许出现在 `data` / `infrastructure` 层 | `...::test_excel_libraries_only_allowed_in_data_and_infrastructure` |
+| `data` 层只依赖 `domain` | `...::test_data_layer_does_not_depend_on_upper_layers` |
+| 模板结构规范不含 Excel 依赖 | `...::test_template_spec_is_free_of_excel_dependency` |
 | 界面层不含消纳公式 | `...::TestUIContainsNoBusinessFormulas::test_self_consumption_rates_are_not_computed_in_ui` |
 | 应用服务层不含公式 | `...::test_service_does_not_contain_formulas` |
 | 界面层不执行 SQL | `...::test_ui_does_not_import_sqlite_or_run_sql` |

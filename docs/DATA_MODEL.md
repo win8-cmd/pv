@@ -10,6 +10,9 @@
 
 ---
 
+
+---
+
 ## 1. 总体约定
 
 | 项目 | 约定 |
@@ -344,6 +347,35 @@ scenario ──1:N── calculation_run (计算运行记录) ──1:N── re
 | 结果状态（字面量） | `ok` / `undefined` | `result_record.status` |
 
 Python 侧所有枚举均继承 `str`，`.value` 即数据库存储值。
+
+---
+
+## V2.1 账单模型（阶段 2 新增）
+
+来源：`src/cenep/domain/bill_models.py`。对应规格书第 29 节。
+
+| 实体 | 职责 | 关键约束 |
+|---|---|---|
+| `ElectricityBill` | 月度账单主记录 | 金额/电量 `Decimal`；总电量非负；账期顺序；需量单位限 `kW`/`kVA`；未确认不可测算 |
+| `BillFeeItem` | 费用明细 | 包含关系 `是/否/待核实`；仅"未包含"且"纳入基准"才计入合计；需量类可识别 |
+| `BillTimeOfUseItem` | 分时/逐小时电量电价 | 必须标口径与购电/上网类型；缺失电量保持 `None`；电价不得跨时段复制 |
+| `BillMeterPoint` | 计量点 | `included_in_total` 与 `allowed_in_rollup` 均明确时才可汇总 |
+| `BillImportBatch` | 导入批次 | 文件摘要（重复识别）、记录计数、导入结果 |
+| `BillValidationIssue` | 校验问题 | 严重程度 阻断/警告/提示；定位到 表/行/字段；阻断级未通过即拦截 |
+
+### 数值与空值约定
+
+- **金额与电量一律 `Decimal`**：构造时通过 `to_decimal()` 归一，**传入 `float` 抛 `TypeError`**。
+- **`None` 表示"未提供"，`Decimal(0)` 表示"确为零"**，两者在任何比较与计算中都不等价，
+  系统**不会**把 `None` 当作 0 参与求和。
+- 负费用合法：功率因数调整电费可为负，必须保留负号。
+- 单位：电量 `kWh`、电价 `元/kWh`、金额 `元`、需量 `kW` 或 `kVA`。
+
+### 与既有 `BillRecord` 的关系
+
+第一阶段已建的 `BillRecord`（8 列，金额列为 `REAL`）**保留不动**。
+新的六类实体是 V2.1 账单能力的正式模型；
+落库方案（含 `SCHEMA_VERSION = 2` 迁移与金额精度调整）属阶段 4，尚未实施。
 
 ---
 

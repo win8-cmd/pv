@@ -127,6 +127,65 @@ class TestLayerIsolation:
             "PDF/OCR 依赖只允许出现在基础设施层，以下位置越界：\n" + "\n".join(offenders)
         )
 
+    def test_excel_libraries_only_allowed_in_data_and_infrastructure(self) -> None:
+        """Excel 读写库只允许出现在 ``data`` 与 ``infrastructure`` 层。
+
+        规则（`docs/ARCHITECTURE.md` 依赖方向规则第 5 条）：
+
+        - ``data``：允许（Excel 读写、模板生成是本层职责）；
+        - ``infrastructure``：允许（如需导出/持久化集成）；
+        - ``domain`` / ``calculations``：禁止（保持纯领域与纯计算）；
+        - ``application``：禁止（只编排流程，不直接操作表格）；
+        - ``ui``：禁止（界面不得直接操作 Excel，必须走 ``data``）。
+
+        该约束保证"Excel 读写逻辑不得直接散落在界面代码中"（规格书第 8 节）。
+        """
+        excel_prefixes = ("openpyxl", "xlsxwriter", "xlrd", "xlwt", "pandas")
+        allowed_layers = ("data", "infrastructure")
+        offenders: list[str] = []
+
+        for path in _iter_python_files(SRC_DIR):
+            relative = path.relative_to(SRC_DIR)
+            if relative.parts and relative.parts[0] in allowed_layers:
+                continue
+            for module, lineno in _imported_modules(path):
+                for prefix in excel_prefixes:
+                    if _matches(module, prefix):
+                        offenders.append(f"{relative}:{lineno} 导入了 {module}")
+
+        assert not offenders, (
+            "Excel 读写依赖只允许出现在 data / infrastructure 层，以下位置越界：\n"
+            + "\n".join(offenders)
+        )
+
+    def test_data_layer_actually_uses_openpyxl(self) -> None:
+        """反向检查：模板生成器确实通过 openpyxl 写出真实文件，而非空实现。"""
+        writer = SRC_DIR / "data" / "template_writer.py"
+        assert writer.exists(), "缺少模板生成器实现"
+        modules = [module for module, _ in _imported_modules(writer)]
+        assert any(_matches(module, "openpyxl") for module in modules), (
+            "template_writer.py 应当导入 openpyxl 完成真实写文件"
+        )
+
+    def test_data_layer_does_not_depend_on_upper_layers(self) -> None:
+        """``data`` 层只依赖 ``domain``：不得依赖 ui / application / infrastructure。"""
+        for path in _iter_python_files(SRC_DIR / "data"):
+            for module, lineno in _imported_modules(path):
+                for forbidden in ("cenep.ui", "cenep.application", "cenep.infrastructure"):
+                    assert not _matches(module, forbidden), (
+                        f"{path.name}:{lineno} 非法依赖 {module}"
+                    )
+
+    def test_template_spec_is_free_of_excel_dependency(self) -> None:
+        """模板**结构规范**必须是纯数据，不得依赖 openpyxl。"""
+        spec = SRC_DIR / "data" / "bill_template_spec.py"
+        assert spec.exists(), "缺少模板结构规范"
+        for module, lineno in _imported_modules(spec):
+            for prefix in ("openpyxl", "xlsxwriter", "pandas", "PySide6", "sqlite3"):
+                assert not _matches(module, prefix), (
+                    f"bill_template_spec.py:{lineno} 不应依赖 {module}（结构规范须为纯数据）"
+                )
+
     def test_infrastructure_pdf_layer_actually_uses_pypdf(self) -> None:
         """反向检查：解析器确实通过 pypdf 实现，而不是自己造轮子或空实现。"""
         extractor = SRC_DIR / "infrastructure" / "pdf" / "extractor.py"
@@ -202,6 +261,9 @@ class TestProjectStructure:
             "application/project_service.py",
             "infrastructure/__init__.py",
             "infrastructure/database.py",
+            "data/__init__.py",
+            "data/bill_template_spec.py",
+            "data/template_writer.py",
             "ui/__init__.py",
             "ui/main_window.py",
         ]
@@ -219,7 +281,7 @@ class TestProjectStructure:
 
     def test_module_count_reflects_layering(self) -> None:
         """分层目录都必须真实存在且包含实现文件。"""
-        for layer in ("domain", "calculations", "application", "infrastructure", "ui"):
+        for layer in ("domain", "calculations", "application", "infrastructure", "data", "ui"):
             files = [path for path in _iter_python_files(SRC_DIR / layer) if path.name != "__init__.py"]
             assert files, f"{layer} 层没有任何实现文件"
 
