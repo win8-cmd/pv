@@ -96,7 +96,7 @@
 
 | 测试类 | 覆盖内容 |
 |---|---|
-| `TestLayerIsolation` | 领域层与计算层无越界第三方依赖（参数化 2 组）；领域层不依赖基础设施层；计算层不依赖界面层；基础设施层不依赖界面层；第一阶段不引入 PDF/OCR 依赖 |
+| `TestLayerIsolation` | 领域层与计算层无越界第三方依赖（参数化 2 组）；领域层不依赖基础设施层；计算层不依赖界面层；基础设施层不依赖界面层；PDF 解析库只允许出现在基础设施层 |
 | `TestUIContainsNoBusinessFormulas` | 界面层无 `min(`/`max(` 消纳公式；界面层不导入 `sqlite3` 且疑似无 SQL；界面层使用应用服务；应用服务层无公式 |
 | `TestProjectStructure` | 17 个必需模块文件存在；单文件不超过 1200 行；5 个分层目录都有实现文件 |
 | `TestNoFakeImplementations` | 核心路径无 `NotImplementedError` 占位；无"只有 `pass` 的函数体"；界面层无硬编码"保存成功"文案且保留 `QMessageBox.critical` |
