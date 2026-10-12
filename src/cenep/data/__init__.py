@@ -40,11 +40,24 @@ from cenep.data.bill_validation import (
     ValidationReport,
     validate_bill_data,
 )
+from cenep.data.template_reader import (
+    COLUMN_ALIASES,
+    ColumnMapping,
+    TemplateReadError,
+    TemplateReadResult,
+    TemplateRow,
+    build_column_mapping,
+    compute_file_hash,
+    map_header,
+    normalize_header,
+    read_template,
+)
 
 __all__ = [
     "ALL_SHEETS",
     "BUSINESS_SHEETS",
     "CHECK_ITEMS",
+    "COLUMN_ALIASES",
     "EXCLUDED_SHEETS",
     "SAMPLE_MARKER_TEXT",
     "SAMPLE_TEMPLATE_ROWS",
@@ -57,9 +70,18 @@ __all__ = [
     "SHEET_TIME_OF_USE",
     "TEMPLATE_NAME",
     "TEMPLATE_VERSION",
+    "ColumnMapping",
     "SheetSpec",
+    "TemplateReadError",
+    "TemplateReadResult",
+    "TemplateRow",
     "ValidationReport",
+    "build_column_mapping",
+    "compute_file_hash",
     "get_sheet",
     "headers_of",
+    "map_header",
+    "normalize_header",
+    "read_template",
     "validate_bill_data",
 ]
