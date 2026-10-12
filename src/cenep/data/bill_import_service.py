@@ -544,7 +544,63 @@ class BillImportService:
             project_id=project_id,
             result=conversion,
         )
+        self._link_details(conversion)
         return conversion
+
+    @staticmethod
+    def _link_details(conversion: ConversionResult) -> None:
+        """把分时 / 费用 / 计量点明细关联到同账期的账单主记录。
+
+        关联规则（显式、可追溯）：
+
+        - 按 ``项目 + 账期`` 匹配账单；
+        - 同一账期存在多张账单时，关联到**第一张**并记录问题，
+          提示人工确认需要归属哪一张，**不静默猜测**；
+        - 找不到同账期账单时保持 ``bill_id`` 为空，并记录问题
+          （该明细将无法落库，需人工修正账期）。
+        """
+        by_period: dict[str, list[ElectricityBill]] = {}
+        for bill in conversion.bills:
+            by_period.setdefault(bill.billing_period or "", []).append(bill)
+
+        def link(item: object, sheet: str) -> None:
+            period = getattr(item, "billing_period", None) or ""
+            candidates = by_period.get(period, [])
+            if not candidates:
+                conversion.issues.append(
+                    ConversionIssue(
+                        sheet_name=sheet,
+                        row_number=0,
+                        column_name="账期",
+                        message=(
+                            f"账期 {period or '（空）'} 在月度汇总中不存在对应账单，"
+                            "该明细无法归属，需修正账期"
+                        ),
+                        raw_value=period,
+                    )
+                )
+                return
+            if len(candidates) > 1:
+                conversion.issues.append(
+                    ConversionIssue(
+                        sheet_name=sheet,
+                        row_number=0,
+                        column_name="账期",
+                        message=(
+                            f"账期 {period} 对应 {len(candidates)} 张账单，"
+                            "已暂时归属第一张，请人工确认归属"
+                        ),
+                        raw_value=period,
+                    )
+                )
+            item.bill_id = candidates[0].bill_id
+
+        for item in conversion.tou_items:
+            link(item, SHEET_TIME_OF_USE)
+        for item in conversion.fee_items:
+            link(item, SHEET_FEE_ITEMS)
+        for item in conversion.meter_points:
+            link(item, SHEET_METER_POINTS)
 
     def _detect_duplicates(
         self,

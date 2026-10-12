@@ -150,6 +150,62 @@
 
 ---
 
+### 阶段 3（完成）与阶段 4（部分）：导入服务层与账单落库（2026-10-12）
+
+**新增**
+
+- `src/cenep/data/template_mapping.py`：模板行 → 账单六类实体。
+  空单元格保持 `None`（不补 0）；金额/电量转 `Decimal`；
+  支持"元/MWh → 元/kWh"显式换算并留痕；
+  领域约束失败（负电量等）转为**可定位的导入问题并丢弃该行**，不让整份导入崩溃。
+- `src/cenep/data/bill_import_service.py`：两阶段导入用例。
+  `preview()` **只读**（计数 + 问题定位 + 重复候选）；
+  `apply()` 写入，支持取消 / 仅导入有效 / 全部导入，
+  重复记录支持跳过 / 替换 / 保留；存在阻断问题时拒绝"全部导入"；
+  取消导入不写任何数据；持久化经 `BillRepository` 协议注入。
+- `src/cenep/infrastructure/schema_v2.py`：模式版本 2 的表结构。
+  新增 `bill`、`bill_fee_item`、`bill_tou_item`、`bill_meter_point`、
+  `bill_import_batch`、`bill_validation_issue`。
+  **金额与电量用 `TEXT` 存十进制字符串**（不再用 `REAL`）；
+  `NULL` 表示未提供；金额列**允许负值**（真实账单存在合法负费用）。
+- `src/cenep/infrastructure/bill_repository.py`：`SqliteBillRepository`。
+  六类实体读写、批次在单事务写入、业务键唯一索引兜底、
+  人工确认与复核状态更新、样本不得确认。
+
+**模式迁移**
+
+`SCHEMA_VERSION` 由 **1 提升到 2**，并在 `MIGRATIONS[1]` 登记 1 → 2 的
+真实结构变更。由于是**纯新增**（不删列、不改列类型、不动既有数据），
+迁移复用幂等的 `CREATE TABLE/INDEX IF NOT EXISTS`，对既有 v1 库只补建新表。
+**`bill_record` 保留不动**，以非破坏方式并存。
+新增测试实测：v1 库升级后版本变为 2、旧项目与旧 `bill_record` 数据完整保留。
+
+**实测结果**
+
+- 全量测试 **793 passed**（0 failed / 0 error / 0 skipped），
+  较上一轮增加 56 例；
+- 新增 `test_schema_v2_enums.py`（35 例）：**在建库阶段就拦住 DDL 枚举
+  与领域枚举的漂移**。实测中确实发现 3 处漂移并修正
+  （`ImportOutcome` 的 `成功/失败` 应为 `全部导入/导入失败`；
+  `MeteringBasis` 的 `发电` 应为 `其他`；
+  `TimeOfUsePeriod` 的 `尖/峰/谷/其它` 应为 `尖峰/高峰/低谷/其他`）；
+- 新增 `test_bill_persistence.py`（18 例）：含"保存→关闭→重开仍可读回"、
+  金额 `Decimal` 精确往返（不出现浮点尾数）、
+  `None` 与 `Decimal(0)` 严格区分、负费用保留、两个月样本端到端回归、
+  重复导入的跳过/替换、业务键唯一索引兜底。
+
+**修复的自身缺陷**
+
+1. `_bill_from_row` 未读回 `confirmation` 列，导致"已确认"账单重开后
+   被误认为"待确认"——已修复并加断言；
+2. 唯一的业务键冲突抛出原始 `sqlite3.IntegrityError`，
+   未翻译为 `PersistenceError`——已修复。
+
+**仍未完成**
+
+人工录入界面与服务、GUI 接入、账单页面与报告导出未实现；
+GUI 未启动；未推送。
+
 ## [0.1.0] 第一阶段 — 工程骨架与核心规则冻结
 
 **状态**：已完成并合入 `main`（PR #1，merge commit `4b6f1cb8`）

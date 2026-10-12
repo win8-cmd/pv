@@ -288,10 +288,77 @@ class TestSchemaVersionProtection:
         assert "低于本程序支持的版本" in str(excinfo.value)
         assert reopened.schema_version() == 0
 
-    def test_migration_registry_is_empty_for_stage_one(self) -> None:
-        """第一阶段没有历史版本，迁移注册表必须为空（有迁移步骤时必须登记）。"""
-        assert SCHEMA_VERSION == 1
-        assert MIGRATIONS == {}
+    def test_every_historical_version_has_a_migration_step(self) -> None:
+        """每个历史版本都必须登记迁移步骤，禁止只改版本号。
+
+        版本 1 时代本测试断言"注册表为空"；提升到版本 2 后，
+        该断言升级为更强的性质：``1..SCHEMA_VERSION-1`` 全部有迁移步骤。
+        """
+        assert SCHEMA_VERSION >= 1
+        for version in range(1, SCHEMA_VERSION):
+            assert version in MIGRATIONS, f"缺少从版本 {version} 升级到 {version + 1} 的步骤"
+            assert MIGRATIONS[version], f"版本 {version} 的迁移步骤不得为空"
+
+    def test_v2_migration_adds_bill_tables(self) -> None:
+        """1 → 2 的迁移必须真的新增账单表，而不是空操作。"""
+        from cenep.infrastructure.schema_v2 import BUSINESS_TABLES_V2
+
+        steps = MIGRATIONS[1]
+        joined = "\n".join(steps)
+        for table in BUSINESS_TABLES_V2:
+            assert f"CREATE TABLE IF NOT EXISTS {table}" in joined, f"迁移缺少建表：{table}"
+
+    def test_version_1_database_upgrades_and_keeps_data(self, db_path: Path) -> None:
+        """关键兼容性：**既有 v1 数据库**升级后必须可打开，且数据不丢失。"""
+        from cenep.infrastructure.schema_v2 import BUSINESS_TABLES_V2
+
+        db = Database(db_path)
+        db.initialize_schema()
+        # 造一条 v1 时代的数据：项目 + 第一阶段 bill_record
+        repository = ProjectRepository(db)
+        project = repository.add(Project(name="v1 旧项目"))
+        with db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO bill_record(bill_id, project_id, billing_period_start, "
+                "billing_period_end, total_energy_kwh, total_amount_yuan, validation_status) "
+                "VALUES('legacy-bill', ?, '2025-01-01', '2025-01-31', 100.0, 200.0, 'valid')",
+                (project.project_id,),
+            )
+
+        # 模拟"这个库是旧程序建的"：把版本写回 1，并删掉 v2 表
+        with db.transaction() as conn:
+            for table in BUSINESS_TABLES_V2:
+                conn.execute(f"DROP TABLE IF EXISTS {table}")
+            conn.execute(
+                "UPDATE schema_meta SET value = '1' WHERE key = 'schema_version'"
+            )
+        db.close()
+
+        # 用当前程序重新打开：应自动迁移到 v2 并保留数据
+        reopened = Database(db_path)
+        reopened.initialize_schema()
+        assert reopened.schema_version() == 2
+
+        assert ProjectRepository(reopened).count() == 1, "旧项目必须保留"
+        tables = set(reopened.table_names())
+        for table in BUSINESS_TABLES_V2:
+            assert table in tables, f"迁移后缺少表：{table}"
+        with reopened.transaction() as conn:
+            row = conn.execute(
+                "SELECT total_amount_yuan FROM bill_record WHERE bill_id = 'legacy-bill'"
+            ).fetchone()
+        assert row is not None, "第一阶段 bill_record 数据必须保留"
+        assert float(row["total_amount_yuan"]) == 200.0
+        reopened.close()
+
+    def test_bill_record_is_preserved_alongside_new_bill_tables(self, db_path: Path) -> None:
+        """v2 采用非破坏方式新增账单表，第一阶段 bill_record 必须仍然存在。"""
+        db = Database(db_path)
+        db.initialize_schema()
+        tables = set(db.table_names())
+        assert "bill_record" in tables, "不得删除第一阶段账单表"
+        assert "bill" in tables, "应新增 v2 账单表"
+        db.close()
 
     def test_registered_migration_upgrades_real_structure(
         self, db_path: Path, monkeypatch: pytest.MonkeyPatch
