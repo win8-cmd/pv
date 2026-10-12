@@ -69,9 +69,14 @@ CENEP 采用 **Python 模块化单体（modular monolith）** 架构，严格分
 1. `ui` → `application` → `domain` / `calculations`，单向，不得反向。
 2. `application` 可以调用 `infrastructure`；`infrastructure` **不得**调用 `application` 或 `ui`。
 3. `domain` 与 `calculations` **不得**导入 `PySide6`、`shiboken6`、`sqlite3`、
-   `pandas`、`numpy`、`openpyxl`、任何 PDF/OCR 库，
+   `pandas`、`numpy`、`openpyxl`、任何 PDF 解析库，
    也不得导入 `cenep.ui`、`cenep.infrastructure`、`cenep.application`。
 4. 同层内的模块可以互相引用（例如 `domain.validation` 引用 `domain.models`）。
+5. `data`（Excel / CSV 读写、模板生成、列映射、数据质量检查）**只依赖 `domain`**；
+   `application` / `ui` 通过 `data` 处理表格，**不得**在界面或应用代码中直接操作 Excel。
+   Excel 读写库（`openpyxl`）只允许出现在 `data` 与 `infrastructure` 层。
+6. 依赖方向汇总（只能向右依赖）：`ui` → `application` → `data` / `domain` / `calculations`；
+   `data` 只依赖 `domain`；`infrastructure` 不依赖 `application` / `ui`。
 
 ### 2.1 依赖规则的自动化强制
 
@@ -83,7 +88,10 @@ CENEP 采用 **Python 模块化单体（modular monolith）** 架构，严格分
 | 领域层不依赖基础设施层 | `...::test_domain_layer_does_not_import_infrastructure` |
 | 计算层不依赖界面层 | `...::test_calculations_do_not_import_ui` |
 | 基础设施层不依赖界面层 | `...::test_infrastructure_does_not_import_ui` |
-| 第一阶段不引入 PDF/OCR 依赖 | `...::test_pdf_and_ocr_libraries_not_used_in_stage_one` |
+| PDF 解析库只允许出现在基础设施层 | `...::test_pdf_libraries_only_allowed_in_infrastructure` |
+| Excel 读写库只允许出现在 `data` / `infrastructure` 层 | `...::test_excel_libraries_only_allowed_in_data_and_infrastructure` |
+| `data` 层只依赖 `domain` | `...::test_data_layer_does_not_depend_on_upper_layers` |
+| 模板结构规范不含 Excel 依赖 | `...::test_template_spec_is_free_of_excel_dependency` |
 | 界面层不含消纳公式 | `...::TestUIContainsNoBusinessFormulas::test_self_consumption_rates_are_not_computed_in_ui` |
 | 应用服务层不含公式 | `...::test_service_does_not_contain_formulas` |
 | 界面层不执行 SQL | `...::test_ui_does_not_import_sqlite_or_run_sql` |

@@ -3,24 +3,32 @@
 - 文档版本：`2026.10-phase2-p0-1`
 - 软件版本：`0.1.0`
 - 对应测试目录：`tests/`
-- 当前基线：**321 个用例，全部通过**（实测结果见 `docs/ACCEPTANCE_CRITERIA.md`）
-- 最近一次实测：2026-10-11，Python 3.14.7，Windows 11，`321 passed`
+- 当前基线：**647 个用例，全部通过**（实测结果见 `docs/ACCEPTANCE_CRITERIA.md`）
+- 最近一次实测：2026-10-12，Python 3.14.7，Windows 11，`647 passed`
 
 按文件分布（实测 `pytest --collect-only -q` 输出）：
 
 | 测试文件 | 用例数 | 层次 |
 |---|---:|---|
+| `tests/unit/test_validation.py` | 52 | 单元 |
+| `tests/unit/test_self_consumption.py` | 42 | 单元 |
+| `tests/unit/test_layering.py` | 22 | 单元（架构约束） |
+| `tests/unit/test_package_import.py` | 21 | 单元 / 应用验证 |
+| `tests/unit/test_gui_main_window.py` | 17 | 界面（标记 gui） |
+| `tests/unit/test_pdf_extraction.py` | 75 | 单元（P0-1 PDF 提取，已冻结） |
+| `tests/unit/test_bill_field_recognition.py` | 66 | 单元（P0-2 字段识别，已冻结） |
+| `tests/unit/test_bill_confirmation_and_evidence.py` | 25 | 单元（确认闸门与证据） |
+| `tests/unit/test_needs_manual_review.py` | 16 | 单元（复核语义专项，V2.1 阶段 1） |
+| `tests/unit/test_bill_template.py` | 78 | 单元（模板生成，V2.1 阶段 2） |
+| `tests/unit/test_bill_models.py` | 86 | 单元（账单模型，V2.1 阶段 2） |
+| `tests/unit/test_bill_validation.py` | 46 | 单元（13 类校验，V2.1 阶段 2） |
+| `tests/unit/test_cli_bill_template.py` | 5 | 单元（CLI 模板命令，V2.1 阶段 2） |
 | `tests/integration/test_database.py` | 51 | 集成 |
 | `tests/integration/test_database_memory_and_schema_version.py` | 45 | 集成（内存库与模式版本保护） |
-| `tests/unit/test_gui_main_window.py` | 17 | 界面（标记 gui） |
-| `tests/unit/test_layering.py` | 18 | 单元（架构约束） |
-| `tests/unit/test_package_import.py` | 21 | 单元 / 应用验证 |
-| `tests/unit/test_pdf_extraction.py` | 75 | 单元（P0-1 PDF 提取与状态语义） |
-| `tests/unit/test_self_consumption.py` | 42 | 单元 |
-| `tests/unit/test_validation.py` | 52 | 单元 |
-| **合计** | **321** | |
+| **合计** | **647** | |
 
-小计：单元与界面测试 225 个，集成测试 96 个。
+
+小计：单元与界面测试 551 个，集成测试 96 个。
 
 > 用例数量随缺陷修复与功能增加而变化。判断质量的标准是
 > **`0 failed`、`0 error`、`0 skipped`**，而不是数量本身。
@@ -96,7 +104,7 @@
 
 | 测试类 | 覆盖内容 |
 |---|---|
-| `TestLayerIsolation` | 领域层与计算层无越界第三方依赖（参数化 2 组）；领域层不依赖基础设施层；计算层不依赖界面层；基础设施层不依赖界面层；第一阶段不引入 PDF/OCR 依赖 |
+| `TestLayerIsolation` | 领域层与计算层无越界第三方依赖（参数化 2 组）；领域层不依赖基础设施层；计算层不依赖界面层；基础设施层不依赖界面层；PDF 解析库只允许出现在基础设施层 |
 | `TestUIContainsNoBusinessFormulas` | 界面层无 `min(`/`max(` 消纳公式；界面层不导入 `sqlite3` 且疑似无 SQL；界面层使用应用服务；应用服务层无公式 |
 | `TestProjectStructure` | 17 个必需模块文件存在；单文件不超过 1200 行；5 个分层目录都有实现文件 |
 | `TestNoFakeImplementations` | 核心路径无 `NotImplementedError` 占位；无"只有 `pass` 的函数体"；界面层无硬编码"保存成功"文案且保留 `QMessageBox.critical` |

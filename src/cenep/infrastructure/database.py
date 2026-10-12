@@ -35,13 +35,25 @@ from cenep.domain.exceptions import (
 )
 from cenep.domain.models import Project, utc_now_iso
 from cenep.domain.validation import require_valid_project
+from cenep.infrastructure.schema_v2 import (
+    BUSINESS_TABLES_V2,
+    SCHEMA_STATEMENTS_V2,
+)
 
 # ---------------------------------------------------------------------------
 # 模式定义
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 1
-"""数据库模式版本，写入 ``schema_meta`` 表。"""
+SCHEMA_VERSION = 2
+"""数据库模式版本，写入 ``schema_meta`` 表。
+
+版本历史：
+
+- **1**：第一阶段冻结的 11 张实体表（``bill_record`` 用 ``REAL`` 存金额）。
+- **2**：新增账单六类实体表（``bill`` 与四张明细表、``bill_import_batch``、
+  ``bill_validation_issue``），金额与电量改用 ``TEXT`` 存十进制字符串。
+  ``bill_record`` **保留不动**，以非破坏方式并存。
+"""
 
 #: 迁移步骤注册表：``{起始版本: (迁移 SQL, ...)}``。
 #:
@@ -49,10 +61,17 @@ SCHEMA_VERSION = 1
 #: :meth:`Database.initialize_schema` 会按版本阶梯依次执行，并在每一步之后
 #: 更新 ``schema_meta`` 中的版本号。
 #:
-#: **当前为空**：``SCHEMA_VERSION == 1`` 尚无历史版本需要迁移。
-#: 一旦把 ``SCHEMA_VERSION`` 提升到 2，必须在此登记从 1 到 2 的**真实表结构变更**
-#: （例如 ``ALTER TABLE ... ADD COLUMN``）。禁止只改版本号而不迁移结构。
-MIGRATIONS: dict[int, tuple[str, ...]] = {}
+#: 键 ``1`` 表示"从版本 1 升级到版本 2"。
+#:
+#: **1 → 2 的真实结构变更**：新增账单六类实体表。
+#: 由于是**纯新增**（不删列、不改列类型、不动既有数据），
+#: 迁移步骤直接复用 ``CREATE TABLE / CREATE INDEX IF NOT EXISTS`` 语句 ——
+#: 这些语句本身幂等，对既有 v1 数据库执行只会补建缺失的表，
+#: **不会修改或丢失任何既有数据**，因此无需 ``ALTER TABLE``。
+#: ``bill_record`` 保持原样，仍可被旧功能读写。
+MIGRATIONS: dict[int, tuple[str, ...]] = {
+    1: SCHEMA_STATEMENTS_V2,
+}
 
 
 class _MissingVersion:
@@ -267,7 +286,9 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """.format(report_type=_REPORT_TYPE_VALUES, status=_REPORT_STATUS_VALUES),
     "CREATE INDEX IF NOT EXISTS idx_report_project ON report(project_id)",
-)
+) + SCHEMA_STATEMENTS_V2
+#: 完整模式 = 版本 1 的基础表 + 版本 2 的账单六类实体表。
+#: 新建数据库一次性建全；既有 v1 数据库由 `MIGRATIONS[1]` 补建 v2 表。
 
 #: 全部业务表名（不含 ``schema_meta``），供测试与文档核对。
 BUSINESS_TABLES: tuple[str, ...] = (
@@ -282,7 +303,7 @@ BUSINESS_TABLES: tuple[str, ...] = (
     "result_record",
     "validation_issue",
     "report",
-)
+) + BUSINESS_TABLES_V2
 
 
 # ---------------------------------------------------------------------------

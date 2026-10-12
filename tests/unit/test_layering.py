@@ -127,6 +127,65 @@ class TestLayerIsolation:
             "PDF/OCR 依赖只允许出现在基础设施层，以下位置越界：\n" + "\n".join(offenders)
         )
 
+    def test_excel_libraries_only_allowed_in_data_and_infrastructure(self) -> None:
+        """Excel 读写库只允许出现在 ``data`` 与 ``infrastructure`` 层。
+
+        规则（`docs/ARCHITECTURE.md` 依赖方向规则第 5 条）：
+
+        - ``data``：允许（Excel 读写、模板生成是本层职责）；
+        - ``infrastructure``：允许（如需导出/持久化集成）；
+        - ``domain`` / ``calculations``：禁止（保持纯领域与纯计算）；
+        - ``application``：禁止（只编排流程，不直接操作表格）；
+        - ``ui``：禁止（界面不得直接操作 Excel，必须走 ``data``）。
+
+        该约束保证"Excel 读写逻辑不得直接散落在界面代码中"（规格书第 8 节）。
+        """
+        excel_prefixes = ("openpyxl", "xlsxwriter", "xlrd", "xlwt", "pandas")
+        allowed_layers = ("data", "infrastructure")
+        offenders: list[str] = []
+
+        for path in _iter_python_files(SRC_DIR):
+            relative = path.relative_to(SRC_DIR)
+            if relative.parts and relative.parts[0] in allowed_layers:
+                continue
+            for module, lineno in _imported_modules(path):
+                for prefix in excel_prefixes:
+                    if _matches(module, prefix):
+                        offenders.append(f"{relative}:{lineno} 导入了 {module}")
+
+        assert not offenders, (
+            "Excel 读写依赖只允许出现在 data / infrastructure 层，以下位置越界：\n"
+            + "\n".join(offenders)
+        )
+
+    def test_data_layer_actually_uses_openpyxl(self) -> None:
+        """反向检查：模板生成器确实通过 openpyxl 写出真实文件，而非空实现。"""
+        writer = SRC_DIR / "data" / "template_writer.py"
+        assert writer.exists(), "缺少模板生成器实现"
+        modules = [module for module, _ in _imported_modules(writer)]
+        assert any(_matches(module, "openpyxl") for module in modules), (
+            "template_writer.py 应当导入 openpyxl 完成真实写文件"
+        )
+
+    def test_data_layer_does_not_depend_on_upper_layers(self) -> None:
+        """``data`` 层只依赖 ``domain``：不得依赖 ui / application / infrastructure。"""
+        for path in _iter_python_files(SRC_DIR / "data"):
+            for module, lineno in _imported_modules(path):
+                for forbidden in ("cenep.ui", "cenep.application", "cenep.infrastructure"):
+                    assert not _matches(module, forbidden), (
+                        f"{path.name}:{lineno} 非法依赖 {module}"
+                    )
+
+    def test_template_spec_is_free_of_excel_dependency(self) -> None:
+        """模板**结构规范**必须是纯数据，不得依赖 openpyxl。"""
+        spec = SRC_DIR / "data" / "bill_template_spec.py"
+        assert spec.exists(), "缺少模板结构规范"
+        for module, lineno in _imported_modules(spec):
+            for prefix in ("openpyxl", "xlsxwriter", "pandas", "PySide6", "sqlite3"):
+                assert not _matches(module, prefix), (
+                    f"bill_template_spec.py:{lineno} 不应依赖 {module}（结构规范须为纯数据）"
+                )
+
     def test_infrastructure_pdf_layer_actually_uses_pypdf(self) -> None:
         """反向检查：解析器确实通过 pypdf 实现，而不是自己造轮子或空实现。"""
         extractor = SRC_DIR / "infrastructure" / "pdf" / "extractor.py"
@@ -196,14 +255,28 @@ class TestProjectStructure:
             "domain/models.py",
             "domain/validation.py",
             "domain/exceptions.py",
+            "domain/bill_models.py",
             "calculations/__init__.py",
             "calculations/self_consumption.py",
             "application/__init__.py",
             "application/project_service.py",
+            "application/bill_service.py",
             "infrastructure/__init__.py",
             "infrastructure/database.py",
+            "infrastructure/schema_v2.py",
+            "infrastructure/bill_repository.py",
+            "data/__init__.py",
+            "data/bill_template_spec.py",
+            "data/template_writer.py",
+            "data/template_reader.py",
+            "data/template_mapping.py",
+            "data/bill_validation.py",
+            "data/bill_import_service.py",
+            "data/report_data.py",
+            "data/report_writer.py",
             "ui/__init__.py",
             "ui/main_window.py",
+            "ui/bill_page.py",
         ]
         missing = [name for name in expected if not (SRC_DIR / name).exists()]
         assert not missing, f"缺少模块文件：{missing}"
@@ -219,7 +292,7 @@ class TestProjectStructure:
 
     def test_module_count_reflects_layering(self) -> None:
         """分层目录都必须真实存在且包含实现文件。"""
-        for layer in ("domain", "calculations", "application", "infrastructure", "ui"):
+        for layer in ("domain", "calculations", "application", "infrastructure", "data", "ui"):
             files = [path for path in _iter_python_files(SRC_DIR / layer) if path.name != "__init__.py"]
             assert files, f"{layer} 层没有任何实现文件"
 
@@ -254,7 +327,95 @@ class TestNoFakeImplementations:
         assert not offenders, "存在空实现函数：" + "; ".join(offenders)
 
     def test_no_hardcoded_fake_success_results(self) -> None:
-        """界面层不得硬编码"成功"文案来掩盖失败。"""
-        text = (SRC_DIR / "ui" / "main_window.py").read_text(encoding="utf-8")
-        assert "保存成功" not in text
-        assert "QMessageBox.critical" in text
+        """界面层不得硬编码"成功"文案来掩盖失败。
+
+        覆盖 ``ui/`` 下**全部** Python 文件（不只主窗口）。
+        只检查**会显示给用户/日志的字符串字面量**，
+        排除模块与函数的文档字符串（``__doc__``）——因为文档里写
+        "禁止出现某某文案"这类说明本身是正当的，否则会误判（实测踩坑）。
+        """
+        ui_files = sorted((SRC_DIR / "ui").glob("*.py"))
+        assert ui_files, "未找到界面层文件"
+
+        def _docstrings(tree: ast.AST) -> set[int]:
+            """收集所有文档字符串节点所在行号。"""
+            lines: set[int] = set()
+            for node in ast.walk(tree):
+                if isinstance(
+                    node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+                ):
+                    body = getattr(node, "body", [])
+                    if (
+                        body
+                        and isinstance(body[0], ast.Expr)
+                        and isinstance(body[0].value, ast.Constant)
+                        and isinstance(body[0].value.value, str)
+                    ):
+                        lines.add(body[0].value.lineno)
+            return lines
+
+        forbidden = ("保存成功", "导入成功", "操作成功")
+        for path in ui_files:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            doc_lines = _docstrings(tree)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                    continue
+                if node.lineno in doc_lines:
+                    continue
+                for phrase in forbidden:
+                    assert phrase not in node.value, (
+                        f"{path.name} 第 {node.lineno} 行出现硬编码成功文案：{phrase}"
+                    )
+        combined = "\n".join(path.read_text(encoding="utf-8") for path in ui_files)
+        assert "QMessageBox.critical" in combined, "界面层必须保留失败提示的报错出口"
+
+    def test_ui_does_not_touch_excel_or_sql_directly(self) -> None:
+        """界面层不得直接读写 Excel 或直接执行 SQL。"""
+        for path in sorted((SRC_DIR / "ui").glob("*.py")):
+            text = path.read_text(encoding="utf-8")
+            assert "openpyxl" not in text, f"{path.name} 不应直接使用 openpyxl"
+            assert "sqlite3" not in text, f"{path.name} 不应直接使用 sqlite3"
+            assert "INSERT INTO" not in text.upper(), f"{path.name} 不应包含 SQL 写入"
+
+    def test_ui_does_not_import_data_layer(self) -> None:
+        """界面层不得直接导入 ``cenep.data``。
+
+        背景：实测发现账单页面曾直接调用
+        ``cenep.data.template_writer.write_template`` 与
+        ``cenep.data.report_writer``，绕过了应用层 —— 与"界面层只经应用服务
+        访问业务能力"的声明不符。所需类型与函数现由 ``cenep.application`` 转出，
+        本测试防止再次回退。
+        """
+        for path in sorted((SRC_DIR / "ui").glob("*.py")):
+            for lineno, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                stripped = line.strip()
+                if not (stripped.startswith("from cenep.data") or stripped.startswith("import cenep.data")):
+                    continue
+                # 允许在文档字符串/注释中提到，但不允许真实导入
+                raise AssertionError(
+                    f"{path.name}:{lineno} 界面层不得直接导入 data 层：{stripped}"
+                )
+
+    def test_ui_does_not_import_infrastructure_layer(self) -> None:
+        """界面层不得直接导入 ``cenep.infrastructure``（仓储与数据库）。"""
+        for path in sorted((SRC_DIR / "ui").glob("*.py")):
+            for lineno, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                stripped = line.strip()
+                if stripped.startswith("from cenep.infrastructure") or stripped.startswith(
+                    "import cenep.infrastructure"
+                ):
+                    raise AssertionError(
+                        f"{path.name}:{lineno} 界面层不得直接导入基础设施层：{stripped}"
+                    )
+
+    def test_ui_uses_application_service_for_bills(self) -> None:
+        """账单页面必须经应用服务访问业务能力，不得直接依赖 data/infrastructure。"""
+        text = (SRC_DIR / "ui" / "bill_page.py").read_text(encoding="utf-8")
+        assert "BillService" in text, "账单页面必须使用应用服务"
+        assert "SqliteBillRepository" not in text, "界面层不得直接使用仓储"
+        assert "cenep.infrastructure" not in text, "界面层不得直接依赖基础设施层"

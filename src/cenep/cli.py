@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 from typing import Sequence
 
 from cenep import APP_NAME, STAGE, __version__
@@ -101,6 +102,23 @@ def _build_parser() -> argparse.ArgumentParser:
     calc.add_argument("--interval", type=int, default=None, help="时段长度（分钟），可选")
     calc.add_argument("--json", action="store_true", help="以 JSON 输出结构化结果")
 
+    template = subparsers.add_parser(
+        "bill-template",
+        help="生成电费账单标准 Excel 导入模板（7 张工作表，不依赖宏）",
+    )
+    template.add_argument(
+        "--out",
+        dest="out_path",
+        default=None,
+        help="输出文件路径；默认为当前目录下的标准模板名",
+    )
+    template.add_argument(
+        "--dir",
+        dest="out_dir",
+        default=None,
+        help="输出目录；与 --out 同时提供时以 --out 为准",
+    )
+
     subparsers.add_parser("gui", help="启动 PySide6 图形界面")
 
     subparsers.add_parser("info", help="显示版本、阶段与运行环境信息")
@@ -124,6 +142,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         payload = describe_environment()
         payload["stage_name"] = STAGE
         print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "bill-template":
+        from cenep.data.template_writer import default_template_path, write_template
+
+        if args.out_path:
+            target = Path(args.out_path).expanduser()
+        elif args.out_dir:
+            target = default_template_path(args.out_dir)
+        else:
+            target = default_template_path()
+        try:
+            written = write_template(target)
+        except OSError as exc:
+            print(f"模板生成失败：{exc}", file=sys.stderr)
+            return 4
+        print(f"模板已生成：{written}")
+        print("工作表：使用说明、月度汇总、分时电量电价、费用明细、计量点、数据校验、样本参考_勿直接测算")
+        print("提示：样本参考表仅供字段对照，导入时默认忽略；请勿作为生产数据使用。")
         return 0
 
     if args.command == "self-consumption":

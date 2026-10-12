@@ -80,7 +80,11 @@ class TestWindowConstruction:
 
         texts = " ".join(label.text() for label in window.centralWidget().findChildren(QtWidgets.QLabel))
         assert "尚未开放" in texts
-        assert "电费账单 PDF 导入与解析（第二阶段）" in texts
+        # 路线变更：PDF 自动识别已取消，列表必须明确写"已取消"，
+        # 且不得再宣称它处于"第二阶段"（那会让人以为仍在开发）
+        assert "已取消" in texts
+        assert "Excel 模板导入" in texts
+        assert not any("第二阶段" in item for item in NOT_IMPLEMENTED_FEATURES)
         assert len(NOT_IMPLEMENTED_FEATURES) >= 8
 
     def test_status_area_describes_implemented_capability(self, window) -> None:  # noqa: ANN001

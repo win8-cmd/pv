@@ -15,16 +15,37 @@ import sys
 from typing import Sequence
 
 from cenep import APP_NAME, STAGE, __version__
+from cenep.application.bill_service import BillService
 from cenep.application.project_service import ProjectService
+
+__all__ = [
+    "build_bill_service",
+    "build_service",
+    "describe_environment",
+    "main",
+]
 
 
 def build_service(database_path: str | None = None) -> ProjectService:
-    """构造应用服务（同时确保数据库与表结构就绪）。"""
+    """构造项目应用服务（同时确保数据库与表结构就绪）。"""
     from cenep import config
     from cenep.infrastructure.database import Database
 
     path = config.ensure_parent_dir(config.resolve_database_path(database_path))
     return ProjectService(Database(path))
+
+
+def build_bill_service(database_path: str | None = None) -> BillService:
+    """构造账单应用服务。
+
+    与 :func:`build_service` 使用**同一个数据库文件**，
+    因此账单表与项目表始终位于同一库中。
+    """
+    from cenep import config
+    from cenep.infrastructure.database import Database
+
+    path = config.ensure_parent_dir(config.resolve_database_path(database_path))
+    return BillService(Database(path))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -57,7 +78,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     app.setOrganizationName(APP_NAME)
 
     service = build_service()
-    window = MainWindow(service)
+    bill_service = build_bill_service()
+    window = MainWindow(service, bill_service)
     window.show()
     return app.exec()
 
@@ -73,6 +95,3 @@ def describe_environment() -> dict[str, object]:
         "python_version": sys.version.split()[0],
         "qt_available": is_qt_available(),
     }
-
-
-__all__ = ["build_service", "describe_environment", "main"]

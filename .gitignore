@@ -53,6 +53,8 @@ data/exports/
 *.xls
 *.xlsx
 !docs/**/*.xlsx
+# 软件自带的标准账单导入模板是产品资产，必须入库
+!src/cenep/data/templates/*.xlsx
 
 # ===== 日志与临时文件 =====
 *.log
