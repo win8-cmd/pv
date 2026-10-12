@@ -206,6 +206,73 @@
 人工录入界面与服务、GUI 接入、账单页面与报告导出未实现；
 GUI 未启动；未推送。
 
+### 阶段 3 完成：人工录入与 GUI 接入（2026-10-12）
+
+**新增**
+
+- `src/cenep/application/bill_service.py`：账单应用服务。
+  - Excel 导入：`preview_import()`（只读）/ `apply_import()`；
+  - **人工录入**：`create_bill()` / `update_bill()` / `delete_bill()`；
+  - **复制上月**：`copy_bill()` —— 继承户号等静态信息，
+    **金额与电量必须显式给出，不继承上月数值**（避免最易发生的虚增数据事故），
+    复核与确认状态重置；
+  - 查询与筛选：`list_bills()` / `list_bills_by_review_status()` / `summarize()`；
+  - **确认闸门**：`usable_bills()` 是"可用于正式测算"的唯一出口
+    （已确认 + 非样本 + 复核状态非"存在疑问"）；
+  - `validate_project_bills()`：对项目全部账单重跑 13 类校验。
+- `src/cenep/ui/bill_page.py`：账单页面。
+  项目选择、账单列表、详情与校验结果、新增/编辑/复制上月/删除/人工确认、
+  导入 Excel（含**导入预览对话框**：计数、阻断提示、逐行错误定位、
+  重复项与处置选择）、生成模板文件下载。
+- 主窗口改为标签页布局（注入 `BillService` 时）：
+  「项目」「电费账单」「未开放功能」；未注入时退化为原单页模式，**既有行为不变**。
+- `cenep.app` 新增 `build_bill_service()`，与项目服务共用同一数据库文件。
+- 未开放功能列表更新：PDF 自动识别与 OCR 明确标注**已取消**，
+  并说明改用"人工录入 + Excel 模板导入"。
+
+**测试（新增 68 例，共 861）**
+
+- `tests/unit/test_bill_service.py`（50 例）：人工录入、空值不补 0、
+  非法数值/日期/单位被拒、整体替换语义、修改后须重新确认、
+  已确认删除需显式授权、复制上月的三项安全规则、
+  **确认闸门**（未确认/存在疑问不得测算、样本不得确认）、汇总不把缺失当 0、
+  与 Excel 导入共用同一套 13 类校验。
+- `tests/unit/test_gui_bill_page.py`（16 例）：真实创建控件并断言
+  标签页出现、按钮启用状态、表格列、未提供字段显示"未提供"而非 0、
+  确认后可用计数变化、删除流程、**失败走 QMessageBox.critical 且不写数据**、
+  样本确认失败必须报错、PDF 路线已取消的披露。
+
+**分层守卫增强**
+
+- `test_no_hardcoded_fake_success_results` 现在覆盖 `ui/` 下**全部**文件，
+  且只检查**用户可见的字符串字面量**（排除文档字符串）——
+  实测中该守卫先是漏掉新页面，改成全目录后又把文档里的说明文字误判为违规。
+- 新增 `test_ui_does_not_touch_excel_or_sql_directly`（界面层不得直接用
+  openpyxl/sqlite3/写 SQL）与 `test_ui_uses_application_service_for_bills`。
+
+**实测**
+
+- 全量测试 **861 passed**（0 failed / 0 error / 0 skipped）；
+- **GUI 真实启动验证通过**：`QT_QPA_PLATFORM=offscreen` 下真实构造
+  `MainWindow(project_service, bill_service)`，标签页为
+  `['项目', '电费账单', '未开放功能']`，账单页含 8 个操作按钮，
+  数据库模式版本读出为 2；
+- 未做人工目视验收（无显示器），界面为程序化断言。
+
+**修复的自身缺陷**
+
+1. `usable_bills()` 原先只看领域层的"已确认 + 非样本"，
+   会放行被标记"存在疑问"的账单 —— 已追加该条件并补测试；
+2. `update_bill()` 用"先插后删"实现，触发业务键唯一索引冲突 ——
+   改为**就地 UPDATE**，并重置确认为"待确认"；
+3. `_review_status()` 收到 `ReviewStatus` 枚举成员时抛
+   "not a valid ReviewStatus"（`str` 子类的经典陷阱）—— 已先判断枚举成员；
+4. `update_bill()` 把 `is_sample` 塞进 `ManualBillInput` 导致 `TypeError` —— 已修正。
+
+**仍未完成**
+
+报告导出（Excel/PDF）与负荷数据导入未实现；打包未做；未推送。
+
 ## [0.1.0] 第一阶段 — 工程骨架与核心规则冻结
 
 **状态**：已完成并合入 `main`（PR #1，merge commit `4b6f1cb8`）

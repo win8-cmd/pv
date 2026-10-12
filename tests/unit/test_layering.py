@@ -255,17 +255,26 @@ class TestProjectStructure:
             "domain/models.py",
             "domain/validation.py",
             "domain/exceptions.py",
+            "domain/bill_models.py",
             "calculations/__init__.py",
             "calculations/self_consumption.py",
             "application/__init__.py",
             "application/project_service.py",
+            "application/bill_service.py",
             "infrastructure/__init__.py",
             "infrastructure/database.py",
+            "infrastructure/schema_v2.py",
+            "infrastructure/bill_repository.py",
             "data/__init__.py",
             "data/bill_template_spec.py",
             "data/template_writer.py",
+            "data/template_reader.py",
+            "data/template_mapping.py",
+            "data/bill_validation.py",
+            "data/bill_import_service.py",
             "ui/__init__.py",
             "ui/main_window.py",
+            "ui/bill_page.py",
         ]
         missing = [name for name in expected if not (SRC_DIR / name).exists()]
         assert not missing, f"缺少模块文件：{missing}"
@@ -316,7 +325,60 @@ class TestNoFakeImplementations:
         assert not offenders, "存在空实现函数：" + "; ".join(offenders)
 
     def test_no_hardcoded_fake_success_results(self) -> None:
-        """界面层不得硬编码"成功"文案来掩盖失败。"""
-        text = (SRC_DIR / "ui" / "main_window.py").read_text(encoding="utf-8")
-        assert "保存成功" not in text
-        assert "QMessageBox.critical" in text
+        """界面层不得硬编码"成功"文案来掩盖失败。
+
+        覆盖 ``ui/`` 下**全部** Python 文件（不只主窗口）。
+        只检查**会显示给用户/日志的字符串字面量**，
+        排除模块与函数的文档字符串（``__doc__``）——因为文档里写
+        "禁止出现某某文案"这类说明本身是正当的，否则会误判（实测踩坑）。
+        """
+        ui_files = sorted((SRC_DIR / "ui").glob("*.py"))
+        assert ui_files, "未找到界面层文件"
+
+        def _docstrings(tree: ast.AST) -> set[int]:
+            """收集所有文档字符串节点所在行号。"""
+            lines: set[int] = set()
+            for node in ast.walk(tree):
+                if isinstance(
+                    node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+                ):
+                    body = getattr(node, "body", [])
+                    if (
+                        body
+                        and isinstance(body[0], ast.Expr)
+                        and isinstance(body[0].value, ast.Constant)
+                        and isinstance(body[0].value.value, str)
+                    ):
+                        lines.add(body[0].value.lineno)
+            return lines
+
+        forbidden = ("保存成功", "导入成功", "操作成功")
+        for path in ui_files:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            doc_lines = _docstrings(tree)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                    continue
+                if node.lineno in doc_lines:
+                    continue
+                for phrase in forbidden:
+                    assert phrase not in node.value, (
+                        f"{path.name} 第 {node.lineno} 行出现硬编码成功文案：{phrase}"
+                    )
+        combined = "\n".join(path.read_text(encoding="utf-8") for path in ui_files)
+        assert "QMessageBox.critical" in combined, "界面层必须保留失败提示的报错出口"
+
+    def test_ui_does_not_touch_excel_or_sql_directly(self) -> None:
+        """界面层不得直接读写 Excel 或直接执行 SQL。"""
+        for path in sorted((SRC_DIR / "ui").glob("*.py")):
+            text = path.read_text(encoding="utf-8")
+            assert "openpyxl" not in text, f"{path.name} 不应直接使用 openpyxl"
+            assert "sqlite3" not in text, f"{path.name} 不应直接使用 sqlite3"
+            assert "INSERT INTO" not in text.upper(), f"{path.name} 不应包含 SQL 写入"
+
+    def test_ui_uses_application_service_for_bills(self) -> None:
+        """账单页面必须经应用服务访问业务能力，不得直接依赖 data/infrastructure。"""
+        text = (SRC_DIR / "ui" / "bill_page.py").read_text(encoding="utf-8")
+        assert "BillService" in text, "账单页面必须使用应用服务"
+        assert "SqliteBillRepository" not in text, "界面层不得直接使用仓储"
+        assert "cenep.infrastructure" not in text, "界面层不得直接依赖基础设施层"

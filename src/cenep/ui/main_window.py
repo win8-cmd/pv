@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -38,14 +39,16 @@ from PySide6.QtWidgets import (
 )
 
 from cenep import APP_NAME, STAGE, __version__
+from cenep.application.bill_service import BillService
 from cenep.application.project_service import ProjectService
 from cenep.domain.exceptions import CENEPError
 from cenep.domain.models import Project, ProjectType
+from cenep.ui.bill_page import BillPage
 
 #: 尚未开放的功能（界面必须显式提示，避免用户误以为已可用）
 NOT_IMPLEMENTED_FEATURES: tuple[str, ...] = (
-    "电费账单 PDF 导入与解析（第二阶段）",
-    "OCR 与复杂版式识别",
+    "电费账单 PDF 自动识别与解析（**该路线已取消**；改用人工录入 + Excel 模板导入）",
+    "OCR 与复杂版式识别（**已取消**）",
     "全国电价政策自动获取",
     "光伏发电量模拟（pvlib）",
     "完整财务现金流、税务与 IRR/NPV 模型",
@@ -146,23 +149,47 @@ class MainWindow(QMainWindow):
         service: 应用服务；界面只通过它访问业务与数据。
     """
 
-    def __init__(self, service: ProjectService) -> None:
+    def __init__(
+        self,
+        service: ProjectService,
+        bill_service: "BillService | None" = None,
+    ) -> None:
         super().__init__()
         self._service = service
+        self._bill_service = bill_service
 
         self.setWindowTitle(f"{APP_NAME} {__version__} —— 工商业分布式光伏经济评价")
-        self.resize(980, 720)
+        self.resize(1080, 760)
 
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
 
         root.addWidget(self._build_header())
-        root.addWidget(self._build_project_group())
-        root.addWidget(self._build_calculation_group())
-        root.addWidget(self._build_status_group())
+
+        if bill_service is None:
+            # 未注入账单服务时退化为单页模式（保持既有行为与测试兼容）
+            root.addWidget(self._build_project_group())
+            root.addWidget(self._build_calculation_group())
+            root.addWidget(self._build_status_group())
+        else:
+            self._tabs = QTabWidget()
+            self._tabs.addTab(self._build_project_tab(), "项目")
+            self._bill_page = BillPage(bill_service)
+            self._tabs.addTab(self._bill_page, "电费账单")
+            self._tabs.addTab(self._build_status_group(), "未开放功能")
+            root.addWidget(self._tabs, 1)
 
         self.refresh_projects()
+
+    def _build_project_tab(self) -> QWidget:
+        """项目页：原有项目与消纳计算区域，外加未开放功能提示。"""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(self._build_project_group())
+        layout.addWidget(self._build_calculation_group())
+        layout.addStretch(1)
+        return page
 
     # -- 区域构建 -------------------------------------------------------
     def _build_header(self) -> QWidget:
@@ -304,6 +331,12 @@ class MainWindow(QMainWindow):
             if count
             else "尚未创建项目。点击“新建项目”创建，数据会真实写入本地 SQLite。"
         )
+
+        # 账单页与项目列表保持同步
+        bill_page = getattr(self, "_bill_page", None)
+        if bill_page is not None:
+            bill_page.refresh_projects(projects)
+            bill_page.set_project(self._selected_project_id())
 
     def _selected_project_id(self) -> str | None:
         row = self._table.currentRow()
